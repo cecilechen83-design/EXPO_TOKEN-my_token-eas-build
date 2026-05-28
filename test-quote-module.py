@@ -71,7 +71,7 @@ else:
 
 # ─── 2. 服务健康检查 ──────────────────────────────────────
 print("\n【2】API 服务健康检查")
-status, resp, err = call("GET", "/api/quote/stats")
+status, resp, err = call("GET", "/api/quote-stats")
 if err:
     test("API 服务可达", False, f"连接失败: {err}")
     print("\n⛔ API 服务不可达，跳过后续测试\n")
