@@ -154,6 +154,12 @@ export default function QuoteManageScreen() {
   const [editingRule, setEditingRule] = useState<AiPriceRule | null>(null);
   const [addingRule, setAddingRule] = useState(false);
 
+  // 新建报价弹窗状态
+  const [newQuoteModal, setNewQuoteModal] = useState(false);
+  const [nqCustomer, setNqCustomer] = useState({ name: "", email: "", company: "", tel: "" });
+  const [nqItems, setNqItems] = useState([{ name: "", weight: "", volume: "", country: "巴西", category: "普货" }]);
+  const [nqSubmitting, setNqSubmitting] = useState(false);
+
   // 加载数据
   const loadData = useCallback(async () => {
     setRefreshing(true);
@@ -177,7 +183,7 @@ export default function QuoteManageScreen() {
       console.error("加载数据失败", e);
     }
     setRefreshing(false);
-  }, [api, statusFilter]);
+  }, [statusFilter]); // api omitted: including it causes infinite re-render when api reference is unstable
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -445,6 +451,43 @@ export default function QuoteManageScreen() {
       showAlert("错误", err.message || "保存失败");
     }
   }, [api, aiRules, priceTable]);
+
+  // 新建报价提交
+  const handleNewQuoteSubmit = useCallback(async () => {
+    if (!nqCustomer.name.trim() || !nqCustomer.email.trim()) {
+      showAlert("提示", "请填写联系人和邮箱");
+      return;
+    }
+    const validItems = nqItems.filter(it => it.name.trim() && parseFloat(it.weight) > 0);
+    if (validItems.length === 0) {
+      showAlert("提示", "请至少填写一件货物（品名和重量必填）");
+      return;
+    }
+    setNqSubmitting(true);
+    try {
+      const res = await api.submitQuote({
+        customer: { ...nqCustomer, wechat: "" },
+        items: validItems.map(it => ({
+          name: it.name, qty: 1,
+          weight: parseFloat(it.weight) || 0,
+          volume: parseFloat(it.volume) || 0,
+          country: it.country, category: it.category,
+        })),
+      });
+      if (res.success) {
+        showAlert("成功", `报价已创建：${res.quoteNo}`);
+        setNewQuoteModal(false);
+        setNqCustomer({ name: "", email: "", company: "", tel: "" });
+        setNqItems([{ name: "", weight: "", volume: "", country: "巴西", category: "普货" }]);
+        loadData();
+      } else {
+        showAlert("失败", (res as any).message || "创建失败");
+      }
+    } catch (e: any) {
+      showAlert("错误", e.message || "网络错误");
+    }
+    setNqSubmitting(false);
+  }, [api, nqCustomer, nqItems, loadData]);
 
   // 统计卡片
   const renderStats = () => (
@@ -950,7 +993,13 @@ export default function QuoteManageScreen() {
               价格表管理
             </Text>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.btn, { marginLeft: "auto" }]} onPress={loadData}>
+          <TouchableOpacity
+            style={[styles.btn, { marginLeft: "auto", backgroundColor: colors.primary, borderWidth: 0 }]}
+            onPress={() => setNewQuoteModal(true)}
+          >
+            <Text style={[styles.btnText, { color: "#fff" }]}>+ 新建报价</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.btn, { marginLeft: 8 }]} onPress={loadData}>
             <Text style={[styles.btnText, { color: colors.primary }]}>
               {refreshing ? "刷新中..." : "🔄 刷新"}
             </Text>
@@ -1180,6 +1229,157 @@ export default function QuoteManageScreen() {
                 onPress={addingRule ? handleSaveNewRule : handleSaveEditRule}
               >
                 <Text style={[styles.btnText, { color: "#fff" }]}>✓ 保存</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 新建报价弹窗 */}
+      <Modal visible={newQuoteModal} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: colors.surface, maxWidth: isWide ? 560 : "95%" }]}>
+            <Text style={[styles.modalTitle, { color: colors.foreground }]}>新建报价</Text>
+            <Text style={[styles.modalDesc, { color: colors.muted }]}>代客户提交询价，系统将自动套价</Text>
+            <ScrollView style={{ maxHeight: 460 }}>
+              <View style={{ flexDirection: "row", gap: 10, marginBottom: 12 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.formLabel, { color: colors.muted }]}>联系人 *</Text>
+                  <TextInput
+                    style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                    value={nqCustomer.name}
+                    onChangeText={v => setNqCustomer(c => ({ ...c, name: v }))}
+                    placeholder="姓名"
+                    placeholderTextColor={colors.muted}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.formLabel, { color: colors.muted }]}>邮箱 *</Text>
+                  <TextInput
+                    style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                    value={nqCustomer.email}
+                    onChangeText={v => setNqCustomer(c => ({ ...c, email: v }))}
+                    placeholder="email@example.com"
+                    placeholderTextColor={colors.muted}
+                    autoCapitalize="none"
+                  />
+                </View>
+              </View>
+              <View style={{ flexDirection: "row", gap: 10, marginBottom: 12 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.formLabel, { color: colors.muted }]}>公司</Text>
+                  <TextInput
+                    style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                    value={nqCustomer.company}
+                    onChangeText={v => setNqCustomer(c => ({ ...c, company: v }))}
+                    placeholder="公司名称（选填）"
+                    placeholderTextColor={colors.muted}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.formLabel, { color: colors.muted }]}>电话</Text>
+                  <TextInput
+                    style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                    value={nqCustomer.tel}
+                    onChangeText={v => setNqCustomer(c => ({ ...c, tel: v }))}
+                    placeholder="联系电话（选填）"
+                    placeholderTextColor={colors.muted}
+                  />
+                </View>
+              </View>
+              <Text style={[styles.formLabel, { color: colors.muted, marginBottom: 8 }]}>货物清单</Text>
+              {nqItems.map((item, idx) => (
+                <View key={idx} style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 10, marginBottom: 10 }}>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 8 }}>
+                    <Text style={{ fontSize: 12, fontWeight: "600", color: colors.foreground }}>货物 #{idx + 1}</Text>
+                    {nqItems.length > 1 && (
+                      <TouchableOpacity onPress={() => setNqItems(prev => prev.filter((_, i) => i !== idx))}>
+                        <Text style={{ fontSize: 12, color: "#EF4444" }}>✕ 删除</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 8, marginBottom: 8 }}>
+                    <View style={{ flex: 2 }}>
+                      <Text style={[styles.formLabel, { color: colors.muted }]}>品名 *</Text>
+                      <TextInput
+                        style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                        value={item.name}
+                        onChangeText={v => setNqItems(prev => prev.map((it, i) => i === idx ? { ...it, name: v } : it))}
+                        placeholder="货物名称"
+                        placeholderTextColor={colors.muted}
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.formLabel, { color: colors.muted }]}>重量(kg) *</Text>
+                      <TextInput
+                        style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                        value={item.weight}
+                        onChangeText={v => setNqItems(prev => prev.map((it, i) => i === idx ? { ...it, weight: v } : it))}
+                        placeholder="0"
+                        placeholderTextColor={colors.muted}
+                        keyboardType="decimal-pad"
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.formLabel, { color: colors.muted }]}>体积(m³)</Text>
+                      <TextInput
+                        style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                        value={item.volume}
+                        onChangeText={v => setNqItems(prev => prev.map((it, i) => i === idx ? { ...it, volume: v } : it))}
+                        placeholder="0"
+                        placeholderTextColor={colors.muted}
+                        keyboardType="decimal-pad"
+                      />
+                    </View>
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.formLabel, { color: colors.muted }]}>目的国</Text>
+                      <TextInput
+                        style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                        value={item.country}
+                        onChangeText={v => setNqItems(prev => prev.map((it, i) => i === idx ? { ...it, country: v } : it))}
+                        placeholder="巴西"
+                        placeholderTextColor={colors.muted}
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.formLabel, { color: colors.muted }]}>品类</Text>
+                      <TextInput
+                        style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                        value={item.category}
+                        onChangeText={v => setNqItems(prev => prev.map((it, i) => i === idx ? { ...it, category: v } : it))}
+                        placeholder="普货"
+                        placeholderTextColor={colors.muted}
+                      />
+                    </View>
+                  </View>
+                </View>
+              ))}
+              <TouchableOpacity
+                style={[styles.btn, { borderStyle: "dashed", alignSelf: "flex-start", marginBottom: 4 }]}
+                onPress={() => setNqItems(prev => [...prev, { name: "", weight: "", volume: "", country: "巴西", category: "普货" }])}
+              >
+                <Text style={[styles.btnText, { color: colors.primary }]}>+ 增加货物</Text>
+              </TouchableOpacity>
+            </ScrollView>
+            <View style={[styles.actionBar, { marginTop: 16 }]}>
+              <TouchableOpacity
+                style={[styles.btn, { borderColor: colors.border }]}
+                onPress={() => {
+                  setNewQuoteModal(false);
+                  setNqCustomer({ name: "", email: "", company: "", tel: "" });
+                  setNqItems([{ name: "", weight: "", volume: "", country: "巴西", category: "普货" }]);
+                }}
+              >
+                <Text style={[styles.btnText, { color: colors.foreground }]}>取消</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.btn, styles.btnPrimary, { backgroundColor: colors.primary, opacity: nqSubmitting ? 0.6 : 1 }]}
+                onPress={handleNewQuoteSubmit}
+                disabled={nqSubmitting}
+              >
+                <Text style={[styles.btnText, { color: "#fff" }]}>{nqSubmitting ? "提交中..." : "✓ 提交询价"}</Text>
               </TouchableOpacity>
             </View>
           </View>

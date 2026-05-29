@@ -288,6 +288,11 @@ export default function QuoteInquiryScreen() {
     setSubmitting(false);
   }, [customer, items, api]);
 
+  const handleModifyItems = () => {
+    setStep("items");
+    setResult(null);
+  };
+
   const handleReset = () => {
     setStep("info");
     setCustomer({ name: "", email: "", company: "", tel: "", wechat: "" });
@@ -703,12 +708,20 @@ export default function QuoteInquiryScreen() {
           )}
         </View>
 
-        <TouchableOpacity
-          style={[styles.nextBtn, { backgroundColor: colors.primary, marginTop: 20 }]}
-          onPress={handleReset}
-        >
-          <Text style={styles.nextBtnText}>提交新询价</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 20 }}>
+          <TouchableOpacity
+            style={[styles.nextBtn, { backgroundColor: "#6B7280", flex: 1 }]}
+            onPress={handleModifyItems}
+          >
+            <Text style={styles.nextBtnText}>← 修改/追加货物</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.nextBtn, { backgroundColor: colors.primary, flex: 1 }]}
+            onPress={handleReset}
+          >
+            <Text style={styles.nextBtnText}>提交新询价</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   };
