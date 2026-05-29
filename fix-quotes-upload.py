@@ -78,7 +78,7 @@ else:
 # Issue 4: 检查是否只有 Excel 解析但没有提交按钮
 has_confirm_upload = bool(re.search(r'confirmUpload|handleConfirmUpload|确认上传|生效', src))
 if not has_confirm_upload:
-    print(f"  {WARN} 未找到"确认上传"逻辑 — 可能只有本地预览，缺少提交到服务器的步骤")
+    print(f"  {WARN} 未找到[确认上传]逻辑 — 可能只有本地预览，缺少提交到服务器的步骤")
     issues.append("no_confirm")
 else:
     print(f"  {PASS} 确认上传逻辑: 找到")
