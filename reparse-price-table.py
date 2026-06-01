@@ -197,13 +197,13 @@ async function main() {
 main().catch(e => { console.log('ERROR:', e.message); process.exit(1); });
 """
 
-node_file = "/tmp/_reparse_pt.js"
+node_file = "/opt/ogi-logistics/_reparse_pt.js"
 with open(node_file, "w") as f:
     f.write(node_code)
 
 print(f"\n{INFO} 运行 Node.js 解析脚本...")
 proc = subprocess.Popen(
-    ["node", node_file],
+    ["node", "_reparse_pt.js"],
     cwd="/opt/ogi-logistics",
     stdout=subprocess.PIPE, stderr=subprocess.PIPE
 )
@@ -227,5 +227,6 @@ if proc.returncode != 0:
 else:
     print(f"\n{PASS} 完成！请刷新前端页面，AI 规则数应已更新")
 
-os.unlink(node_file)
+try: os.unlink(node_file)
+except: pass
 print("="*55 + "\n")
