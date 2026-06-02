@@ -1,0 +1,67 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --primary: #1a56db;
+  --primary-dark: #1e429f;
+  --primary-light: #ebf5ff;
+  --accent: #f59e0b;
+  --accent-dark: #d97706;
+  --bg: #f0f4f8;
+  --card: #ffffff;
+  --text: #1a202c;
+  --text-2: #4a5568;
+  --text-3: #718096;
+  --border: #e2e8f0;
+  --shadow: 0 2px 16px rgba(0,0,0,0.08);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e0; border-radius: 3px; }
+
+/* ===== Animations ===== */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.animate-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+.spinning {
+  animation: spin 1s linear infinite;
+}
