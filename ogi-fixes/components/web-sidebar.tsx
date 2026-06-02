@@ -28,6 +28,7 @@ const NAV_ITEMS: NavItem[] = [
   { key: "quote-manage", label: "半自动报价", icon: "doc.text.fill", route: "/quote-manage", permission: "module:quotes" },
   { key: "quote-inquiry", label: "客户询价", icon: "doc.text.fill", route: "/quote-inquiry" },
   { key: "agents", label: "代理分润", icon: "building.2.fill", route: "/agents", permission: "module:agents", dividerAfter: true },
+  { key: "tariff", label: "拉美查税", icon: "globe.americas.fill", route: "/tariff", dividerAfter: false },
   { key: "approvals", label: "审批风控", icon: "exclamationmark.triangle.fill", route: "/approvals", permission: "module:approvals" },
   { key: "bi", label: "经营分析", icon: "chart.pie.fill", route: "/bi", permission: "module:bi" },
   { key: "accounts", label: "账号管理", icon: "person.badge.key.fill", route: "/accounts", permission: "module:accounts" },
