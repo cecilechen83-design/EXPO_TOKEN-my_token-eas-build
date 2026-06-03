@@ -185,7 +185,7 @@ export default function TariffScreen() {
               {[
                 { icon: "🏷️", t: "HS/NCM编码", d: "直接输入编码，如 8517.13（手机）、6404.11（运动鞋）" },
                 { icon: "📦", t: "商品名称", d: "中文品名，如 液晶电视、洗衣机、背包" },
-                { icon: "🧵", t: "材质描述", d: "如"棉质T恤"、"皮革手提包"、"铝合金框架"" },
+                { icon: "🧵", t: "材质描述", d: '如【棉质T恤】、【皮革手提包】、【铝合金框架】' },
               ].map((h, i) => (
                 <View key={i} style={styles.helpRow}>
                   <Text style={{ fontSize: 18, marginRight: 10 }}>{h.icon}</Text>
