@@ -1,13 +1,14 @@
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback } from "react";
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView,
-  StyleSheet, ActivityIndicator, Platform, Animated,
+  StyleSheet, ActivityIndicator, Platform,
 } from "react-native";
 import { useColors } from "@/hooks/use-colors";
 import { WebLayout } from "@/components/web-sidebar";
 import {
   searchTariff, TAX_DETAIL, COUNTRIES,
   calcBRDetail, calcMXDetail, calcARDetail, calcCODetail, calcCLDetail, calcPEDetail,
+  getCertsForItem,
   type TariffItem,
 } from "@/lib/tariff-data";
 
@@ -660,6 +661,110 @@ function TaxDetailPanel({ item, countryCode, colors, cif }: {
           💡 {detail.calcNote}
         </Text>
       </View>
+
+      {/* Certifications */}
+      <CertSection item={item} countryCode={countryCode} colors={colors} />
+    </View>
+  );
+}
+
+// ============ 认证要求面板 ============
+function CertSection({ item, countryCode, colors }: {
+  item: TariffItem; countryCode: string; colors: any;
+}) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const certs = getCertsForItem(item, countryCode);
+
+  if (certs.length === 0) {
+    return (
+      <View style={[styles.certSection, { borderTopColor: colors.border }]}>
+        <Text style={[styles.certSectionTitle, { color: colors.foreground }]}>📋 进口认证要求</Text>
+        <View style={[styles.certEmptyBox, { backgroundColor: colors.background }]}>
+          <Text style={[styles.certEmptyText, { color: colors.muted }]}>
+            该商品类别暂无特殊认证要求，但仍需符合一般进口标签规范
+          </Text>
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={[styles.certSection, { borderTopColor: colors.border }]}>
+      <View style={styles.certSectionHeader}>
+        <Text style={[styles.certSectionTitle, { color: colors.foreground }]}>📋 进口认证要求</Text>
+        <View style={[styles.certCountBadge, { backgroundColor: colors.warning + "20" }]}>
+          <Text style={[styles.certCountText, { color: colors.warning }]}>
+            {certs.filter(c => c.required === 'mandatory').length} 项强制
+          </Text>
+        </View>
+      </View>
+      <Text style={[styles.certHint, { color: colors.muted }]}>
+        点击各认证查看详情、申请机构及费用参考
+      </Text>
+
+      {certs.map((cert, i) => {
+        const isExpanded = expanded === cert.name;
+        const badgeColor = cert.required === 'mandatory' ? '#ef4444'
+          : cert.required === 'conditional' ? '#f59e0b' : '#10b981';
+        const badgeLabel = cert.required === 'mandatory' ? '强制'
+          : cert.required === 'conditional' ? '有条件' : '建议';
+
+        return (
+          <TouchableOpacity
+            key={i}
+            onPress={() => setExpanded(isExpanded ? null : cert.name)}
+            activeOpacity={0.7}
+            style={[styles.certCard, {
+              backgroundColor: colors.surface,
+              borderColor: isExpanded ? badgeColor + "60" : colors.border,
+              borderLeftColor: badgeColor,
+            }]}
+          >
+            {/* Cert Header */}
+            <View style={styles.certCardHeader}>
+              <View style={[styles.certBadge, { backgroundColor: badgeColor + "15", borderColor: badgeColor + "40" }]}>
+                <Text style={[styles.certBadgeText, { color: badgeColor }]}>{badgeLabel}</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.certName, { color: colors.foreground }]}>{cert.name}</Text>
+                <Text style={[styles.certFullName, { color: colors.muted }]}>{cert.fullName}</Text>
+              </View>
+              <Text style={[styles.certChevron, { color: colors.muted }]}>{isExpanded ? "▲" : "▼"}</Text>
+            </View>
+
+            {/* Cert Scope (always visible) */}
+            <Text style={[styles.certScope, { color: colors.muted }]} numberOfLines={isExpanded ? 0 : 2}>
+              适用：{cert.scope}
+            </Text>
+
+            {/* Expanded Detail */}
+            {isExpanded && (
+              <View style={[styles.certDetail, { borderTopColor: colors.border }]}>
+                {[
+                  { label: "颁发机构", value: cert.authority, icon: "🏛️" },
+                  { label: "要求说明", value: cert.note, icon: "📝" },
+                  cert.duration ? { label: "有效期", value: cert.duration, icon: "📅" } : null,
+                  cert.approxCost ? { label: "费用参考", value: cert.approxCost, icon: "💰" } : null,
+                ].filter(Boolean).map((row: any, j) => (
+                  <View key={j} style={styles.certDetailRow}>
+                    <Text style={styles.certDetailIcon}>{row.icon}</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.certDetailLabel, { color: colors.muted }]}>{row.label}</Text>
+                      <Text style={[styles.certDetailValue, { color: colors.foreground }]}>{row.value}</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+          </TouchableOpacity>
+        );
+      })}
+
+      <View style={[styles.certDisclaimer, { backgroundColor: colors.warning + "08", borderColor: colors.warning + "20" }]}>
+        <Text style={[styles.certDisclaimerText, { color: colors.muted }]}>
+          ⚠️ 认证信息仅供参考，实际要求以各国官方机构最新规定为准。建议委托当地认证代理机构办理。
+        </Text>
+      </View>
     </View>
   );
 }
@@ -809,4 +914,45 @@ const styles = StyleSheet.create({
 
   disclaimer: { borderRadius: 10, borderWidth: 1, padding: 12, marginBottom: 8 },
   disclaimerText: { fontSize: 11, lineHeight: 17 },
+
+  // ===== Certification styles =====
+  certSection: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 14, padding: 14 },
+  certSectionHeader: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 4 },
+  certSectionTitle: { fontSize: 14, fontWeight: "700", flex: 1 },
+  certCountBadge: { borderRadius: 8, paddingHorizontal: 10, paddingVertical: 3 },
+  certCountText: { fontSize: 12, fontWeight: "700" },
+  certHint: { fontSize: 11, marginBottom: 10 },
+  certEmptyBox: { borderRadius: 10, padding: 12, marginBottom: 8 },
+  certEmptyText: { fontSize: 12, lineHeight: 18 },
+
+  certCard: {
+    borderRadius: 10, borderWidth: 1, borderLeftWidth: 3,
+    marginBottom: 8, overflow: "hidden",
+    padding: 12,
+  },
+  certCardHeader: { flexDirection: "row", alignItems: "flex-start", gap: 8, marginBottom: 6 },
+  certBadge: {
+    borderWidth: 1, borderRadius: 5,
+    paddingHorizontal: 6, paddingVertical: 2, alignSelf: "flex-start",
+  },
+  certBadgeText: { fontSize: 10, fontWeight: "700" },
+  certName: { fontSize: 13, fontWeight: "700" },
+  certFullName: { fontSize: 11, marginTop: 1 },
+  certChevron: { fontSize: 11, marginTop: 2 },
+  certScope: { fontSize: 11, lineHeight: 16 },
+
+  certDetail: {
+    marginTop: 10, paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth, gap: 8,
+  },
+  certDetailRow: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
+  certDetailIcon: { fontSize: 14, width: 20 },
+  certDetailLabel: { fontSize: 10, marginBottom: 2 },
+  certDetailValue: { fontSize: 12, lineHeight: 17 },
+
+  certDisclaimer: {
+    borderRadius: 8, borderWidth: 1,
+    padding: 10, marginTop: 4,
+  },
+  certDisclaimerText: { fontSize: 10, lineHeight: 15 },
 });

@@ -12,6 +12,437 @@ export interface TariffItem {
   PE: { arancel: number };
 }
 
+// ============================================================
+// 认证数据库
+// ============================================================
+export interface CertInfo {
+  name: string;       // 证书简称
+  fullName: string;   // 证书全称（中文）
+  authority: string;  // 颁发机构
+  required: 'mandatory' | 'conditional' | 'optional';
+  scope: string;      // 适用范围
+  note: string;       // 说明/备注
+  duration?: string;  // 有效期
+  approxCost?: string; // 大致费用
+}
+
+// 所有认证定义
+export const CERT_DB: Record<string, CertInfo> = {
+  // ===== 巴西 =====
+  BR_ANATEL: {
+    name: 'ANATEL', fullName: '国家电信局型号认证',
+    authority: 'ANATEL（Agência Nacional de Telecomunicações）',
+    required: 'mandatory',
+    scope: '无线通信设备：手机、WiFi、蓝牙、路由器、对讲机等',
+    note: '凡含无线模块的产品均须申请，包括蓝牙耳机、智能手表等',
+    duration: '长期有效（设备型号变更需重新认证）',
+    approxCost: 'USD 3,000~8,000',
+  },
+  BR_INMETRO: {
+    name: 'INMETRO', fullName: '国家计量质量技术研究院强制认证',
+    authority: 'INMETRO（Instituto Nacional de Metrologia, Qualidade e Tecnologia）',
+    required: 'mandatory',
+    scope: '电气产品、电子设备、玩具、PPE、家电、照明等约100余类产品',
+    note: '强制性产品认证（OCP），需在巴西认可实验室测试，产品须加贴INMETRO标志',
+    duration: '3~5年，需定期续证',
+    approxCost: 'USD 2,000~10,000（视产品复杂程度）',
+  },
+  BR_ANVISA: {
+    name: 'ANVISA', fullName: '国家卫生监督局产品注册',
+    authority: 'ANVISA（Agência Nacional de Vigilância Sanitária）',
+    required: 'mandatory',
+    scope: '化妆品、个人护理品、食品、饮料、药品、医疗器械',
+    note: '化妆品需提前登记（Notificação），部分高风险产品需完整注册（Registro）。须指定巴西本地法律责任人',
+    duration: '化妆品5年，药品/器械10年',
+    approxCost: 'USD 500~5,000（化妆品通知较低，药品较高）',
+  },
+  BR_MAPA: {
+    name: 'MAPA', fullName: '农业部进口许可',
+    authority: 'MAPA（Ministério da Agricultura, Pecuária e Abastecimento）',
+    required: 'mandatory',
+    scope: '食品（肉类、乳制品、蜂蜜、谷物等农产品）、植物类产品',
+    note: '需提供卫生证书、检疫证书，部分产品需提前申请进口许可证（LI）',
+    duration: '按批次申请',
+    approxCost: '费用较低，主要是检测费',
+  },
+  BR_DENATRAN: {
+    name: 'DENATRAN/SENATRAN', fullName: '国家交通安全局车型认证',
+    authority: 'SENATRAN（Secretaria Nacional de Trânsito）',
+    required: 'mandatory',
+    scope: '机动车辆（整车）',
+    note: '进口整车须获得车型批准（Homologação），并在DENATRAN登记',
+    duration: '车型有效期内',
+    approxCost: 'USD 10,000~50,000',
+  },
+
+  // ===== 墨西哥 =====
+  MX_NOM_ELEC: {
+    name: 'NOM（电气类）', fullName: 'NOM电气安全强制标准',
+    authority: 'SE/DGN（Secretaría de Economía）',
+    required: 'mandatory',
+    scope: '电气设备、家电、照明、插座、开关、电缆等',
+    note: '主要涉及 NOM-003-SCFI（电气设备安全）、NOM-001-SEDE（电气装置）等，产品需第三方实验室测试并申请NOM符合性证书',
+    duration: '1~3年，需续证',
+    approxCost: 'USD 1,500~6,000',
+  },
+  MX_NOM_TEXTO: {
+    name: 'NOM-004/NOM-050（纺织/消费品）', fullName: 'NOM消费品信息标签标准',
+    authority: 'SE/PROFECO',
+    required: 'mandatory',
+    scope: '纺织品、服装、鞋类、家具、玩具等消费品',
+    note: 'NOM-004-SCFI：纺织品标签（需标注成分、尺寸、洗涤方法）；NOM-050：商业信息，须西班牙语标注',
+    duration: '持续有效',
+    approxCost: 'USD 500~2,000（标签合规费用）',
+  },
+  MX_COFEPRIS: {
+    name: 'COFEPRIS', fullName: '联邦卫生风险防护委员会注册/许可',
+    authority: 'COFEPRIS（Comisión Federal para la Protección contra Riesgos Sanitarios）',
+    required: 'mandatory',
+    scope: '化妆品、食品、饮料、药品、医疗器械、杀虫剂',
+    note: '化妆品需提前通知或注册；食品需卫生注册（RSS）；进口商须持有COFEPRIS颁发的进口许可证',
+    duration: '2~5年',
+    approxCost: 'USD 300~3,000',
+  },
+  MX_IFT: {
+    name: 'IFT/SCT', fullName: '联邦电信局型号认证',
+    authority: 'IFT（Instituto Federal de Telecomunicaciones）',
+    required: 'mandatory',
+    scope: '无线通信设备：手机、WiFi、蓝牙、基站等',
+    note: '所有无线设备须获得IFT同质认证（Homologación），可通过认可实验室申请',
+    duration: '3年',
+    approxCost: 'USD 1,000~4,000',
+  },
+  MX_NOM_AUTO: {
+    name: 'NOM（汽车类）', fullName: 'NOM汽车安全及排放标准',
+    authority: 'SE / SEMARNAT',
+    required: 'mandatory',
+    scope: '机动车辆、汽车零部件',
+    note: '整车进口需满足NOM-041（排放）、NOM-086（燃油）、NOM-194（安全）等多项标准',
+    duration: '车型有效期内',
+    approxCost: 'USD 5,000~20,000',
+  },
+
+  // ===== 阿根廷 =====
+  AR_ENACOM: {
+    name: 'ENACOM', fullName: '国家通信委员会型号认证',
+    authority: 'ENACOM（Ente Nacional de Comunicaciones）',
+    required: 'mandatory',
+    scope: '无线通信设备、电信终端设备',
+    note: '手机、WiFi路由器、蓝牙设备等须取得ENACOM型号认证，可基于FCC/CE互认加快申请',
+    duration: '长期有效',
+    approxCost: 'USD 1,500~5,000',
+  },
+  AR_IRAM: {
+    name: 'S-Mark/IRAM', fullName: 'IRAM安全认证标志',
+    authority: 'IRAM（Instituto Argentino de Normalización y Certificación）',
+    required: 'mandatory',
+    scope: '电气产品、家电、玩具、PPE、建材等',
+    note: '阿根廷强制安全认证，电气产品须通过IRAM授权机构检测，加贴S-Mark标志',
+    duration: '3年，需年度审核',
+    approxCost: 'USD 2,000~8,000',
+  },
+  AR_ANMAT: {
+    name: 'ANMAT', fullName: '国家食品药品医疗技术管理局注册',
+    authority: 'ANMAT（Administración Nacional de Medicamentos, Alimentos y Tecnología Médica）',
+    required: 'mandatory',
+    scope: '化妆品、食品（加工食品）、药品、医疗器械',
+    note: '化妆品需在ANMAT的RNPA系统注册；须有阿根廷本地注册人（Responsable Técnico）',
+    duration: '化妆品无限期，药品5年',
+    approxCost: 'USD 500~3,000',
+  },
+  AR_SENASA: {
+    name: 'SENASA', fullName: '国家农牧渔业卫生质量局认证',
+    authority: 'SENASA（Servicio Nacional de Sanidad y Calidad Agroalimentaria）',
+    required: 'mandatory',
+    scope: '肉类、乳制品、蛋类、水产品、蜂蜜等动物源性食品及植物产品',
+    note: '须提供出口国官方卫生证书，部分产品须预先申请进口许可',
+    duration: '按批次',
+    approxCost: '检测费为主',
+  },
+
+  // ===== 哥伦比亚 =====
+  CO_INVIMA: {
+    name: 'INVIMA', fullName: '国家食品药品监督局注册/许可',
+    authority: 'INVIMA（Instituto Nacional de Vigilancia de Medicamentos y Alimentos）',
+    required: 'mandatory',
+    scope: '化妆品、食品、饮料、药品、医疗器械',
+    note: '化妆品需INVIMA卫生通知（Notificación Sanitaria）；食品需卫生注册（RSA）；须有哥伦比亚本地法人代表',
+    duration: '10年（化妆品）',
+    approxCost: 'USD 300~2,000',
+  },
+  CO_SIC: {
+    name: 'SIC/标签合规', fullName: '工业商业监督局产品标签规范',
+    authority: 'SIC（Superintendencia de Industria y Comercio）',
+    required: 'mandatory',
+    scope: '纺织品、服装、鞋类、电气产品、玩具等',
+    note: '产品须有西班牙语标签，纺织品需注明纤维成分、护理说明；违规可被扣货或罚款',
+    duration: '持续有效',
+    approxCost: '标签制作成本',
+  },
+  CO_CRC: {
+    name: 'CRC/MinTIC', fullName: '通信监管委员会型号认证',
+    authority: 'CRC / MinTIC',
+    required: 'mandatory',
+    scope: '无线通信设备、电信终端',
+    note: '手机、WiFi、蓝牙设备须向MinTIC申请同质认证',
+    duration: '3年',
+    approxCost: 'USD 1,000~3,000',
+  },
+  CO_RETIE: {
+    name: 'RETIE', fullName: '电气装置技术规范认证',
+    authority: 'UPME / ICONTEC',
+    required: 'mandatory',
+    scope: '电气设备、插座、开关、电线电缆、照明等',
+    note: '哥伦比亚强制电气安全认证（Reglamento Técnico de Instalaciones Eléctricas），须第三方认证',
+    duration: '3年',
+    approxCost: 'USD 1,500~5,000',
+  },
+
+  // ===== 智利 =====
+  CL_SEC: {
+    name: 'SEC', fullName: '电气燃气监督局安全认证',
+    authority: 'SEC（Superintendencia de Electricidad y Combustibles）',
+    required: 'mandatory',
+    scope: '电气产品、家电、插座、开关、电线电缆、照明灯具',
+    note: '智利最重要的电气安全认证，分A类（低风险，进口商自我申报）和B类（高风险，第三方测试），须有智利本地代理人',
+    duration: '5年',
+    approxCost: 'USD 1,000~5,000',
+  },
+  CL_SUBTEL: {
+    name: 'SUBTEL', fullName: '电信监管次长室型号认证',
+    authority: 'SUBTEL（Subsecretaría de Telecomunicaciones）',
+    required: 'mandatory',
+    scope: '无线通信设备：手机、WiFi、蓝牙、对讲机',
+    note: '智利无线设备强制认证，可基于FCC/CE/Anatel互认，需本地代理人',
+    duration: '3年',
+    approxCost: 'USD 800~3,000',
+  },
+  CL_ISP: {
+    name: 'ISP', fullName: '公共卫生研究所注册',
+    authority: 'ISP（Instituto de Salud Pública）',
+    required: 'mandatory',
+    scope: '化妆品、药品、医疗器械',
+    note: '化妆品须在ISP的RNPA系统注册，须有智利本地法人责任人（Responsable Legal）',
+    duration: '5年',
+    approxCost: 'USD 300~2,000',
+  },
+  CL_SAG: {
+    name: 'SAG', fullName: '农业畜牧局进口许可',
+    authority: 'SAG（Servicio Agrícola y Ganadero）',
+    required: 'mandatory',
+    scope: '食品（动植物源性产品）、农产品',
+    note: '须提供植物检疫证书或兽医健康证书，部分产品需预先获得进口许可',
+    duration: '按批次',
+    approxCost: '检测费为主',
+  },
+  CL_SERNAC: {
+    name: 'SERNAC/标签合规', fullName: '国家消费者服务局标签规范',
+    authority: 'SERNAC',
+    required: 'mandatory',
+    scope: '纺织品、服装、鞋类、消费品',
+    note: '须有西班牙语标签，纺织品需注明纤维成分、原产地、洗涤方法',
+    duration: '持续有效',
+    approxCost: '标签制作成本',
+  },
+
+  // ===== 秘鲁 =====
+  PE_MTC: {
+    name: 'MTC', fullName: '交通通信部型号认证',
+    authority: 'MTC（Ministerio de Transportes y Comunicaciones）',
+    required: 'mandatory',
+    scope: '无线通信设备：手机、WiFi、蓝牙设备',
+    note: '秘鲁无线设备须获MTC同质认证，可基于FCC/CE/ANATEL认证结果申请',
+    duration: '3年',
+    approxCost: 'USD 800~3,000',
+  },
+  PE_INDECOPI: {
+    name: 'INDECOPI/NTP', fullName: '国家知识产权竞争保护委员会技术标准',
+    authority: 'INDECOPI',
+    required: 'conditional',
+    scope: '电气产品、玩具、纺织品标签等',
+    note: '部分产品需符合秘鲁国家技术标准（NTP），标签须为西班牙语',
+    duration: '持续有效',
+    approxCost: '测试和认证费用',
+  },
+  PE_DIGEMID: {
+    name: 'DIGEMID', fullName: '药品和医疗器械总局注册',
+    authority: 'DIGEMID（Dirección General de Medicamentos, Insumos y Drogas）',
+    required: 'mandatory',
+    scope: '药品、医疗器械',
+    note: '进口药品和医疗器械须在DIGEMID注册，须有秘鲁本地注册人',
+    duration: '5年',
+    approxCost: 'USD 500~3,000',
+  },
+  PE_DIGESA: {
+    name: 'DIGESA', fullName: '环境卫生总局卫生注册',
+    authority: 'DIGESA（Dirección General de Salud Ambiental）',
+    required: 'mandatory',
+    scope: '化妆品、食品、饮料',
+    note: '进口化妆品需DIGESA卫生登记，食品需卫生注册（RSA），须有秘鲁本地法人',
+    duration: '5年',
+    approxCost: 'USD 200~1,500',
+  },
+  PE_SENASA: {
+    name: 'SENASA', fullName: '国家农业卫生局检疫许可',
+    authority: 'SENASA（Servicio Nacional de Sanidad Agraria）',
+    required: 'mandatory',
+    scope: '农产品、食品（动植物源性）',
+    note: '须提供植物检疫/兽医卫生证书，部分产品需预先申请进口许可',
+    duration: '按批次',
+    approxCost: '检测费为主',
+  },
+  PE_MTC_AUTO: {
+    name: 'MTC（车辆）', fullName: '交通通信部车辆技术标准认证',
+    authority: 'MTC / SUNAT',
+    required: 'mandatory',
+    scope: '机动车辆',
+    note: '整车进口须符合排放标准（EURO IV/V），电动车有专项规定',
+    duration: '车型批准有效期内',
+    approxCost: 'USD 3,000~10,000',
+  },
+
+  // ===== 通用 =====
+  COMMON_LABEL_ES: {
+    name: '西班牙语标签', fullName: '产品西班牙语标签要求',
+    authority: '各国海关/消费者保护机构',
+    required: 'mandatory',
+    scope: '所有进入墨西哥、阿根廷、哥伦比亚、智利、秘鲁的消费品',
+    note: '产品标签需包含：品名、原产地、成分/材质、净含量、生产商/进口商信息，必须为西班牙语',
+    duration: '持续有效',
+    approxCost: '标签制作成本',
+  },
+  COMMON_CE: {
+    name: 'CE认证（欧标）', fullName: 'CE欧盟合格标志（互认参考）',
+    authority: '欧盟',
+    required: 'optional',
+    scope: '电气产品、电子设备',
+    note: '拉美各国虽不强制要求CE，但持有CE认证可加速当地认证流程（作为测试报告互认依据）',
+    duration: '长期有效',
+    approxCost: 'USD 1,000~8,000',
+  },
+};
+
+// 按商品章节 + 国家的认证矩阵
+export const CHAPTER_CERTS: Record<string, Record<string, string[]>> = {
+  '电子': {
+    BR: ['BR_ANATEL', 'BR_INMETRO'],
+    MX: ['MX_IFT', 'MX_NOM_ELEC'],
+    AR: ['AR_ENACOM', 'AR_IRAM'],
+    CO: ['CO_CRC', 'CO_RETIE'],
+    CL: ['CL_SUBTEL', 'CL_SEC'],
+    PE: ['PE_MTC', 'PE_INDECOPI'],
+  },
+  '电器': {
+    BR: ['BR_INMETRO'],
+    MX: ['MX_NOM_ELEC'],
+    AR: ['AR_IRAM'],
+    CO: ['CO_RETIE'],
+    CL: ['CL_SEC'],
+    PE: ['PE_INDECOPI'],
+  },
+  '化妆品': {
+    BR: ['BR_ANVISA'],
+    MX: ['MX_COFEPRIS', 'COMMON_LABEL_ES'],
+    AR: ['AR_ANMAT', 'COMMON_LABEL_ES'],
+    CO: ['CO_INVIMA', 'COMMON_LABEL_ES'],
+    CL: ['CL_ISP', 'COMMON_LABEL_ES'],
+    PE: ['PE_DIGESA', 'COMMON_LABEL_ES'],
+  },
+  '食品': {
+    BR: ['BR_ANVISA', 'BR_MAPA'],
+    MX: ['MX_COFEPRIS', 'COMMON_LABEL_ES'],
+    AR: ['AR_ANMAT', 'AR_SENASA', 'COMMON_LABEL_ES'],
+    CO: ['CO_INVIMA', 'COMMON_LABEL_ES'],
+    CL: ['CL_ISP', 'CL_SAG', 'COMMON_LABEL_ES'],
+    PE: ['PE_DIGESA', 'PE_SENASA', 'COMMON_LABEL_ES'],
+  },
+  '服装': {
+    BR: ['BR_INMETRO'],
+    MX: ['MX_NOM_TEXTO'],
+    AR: ['COMMON_LABEL_ES'],
+    CO: ['CO_SIC'],
+    CL: ['CL_SERNAC'],
+    PE: ['PE_INDECOPI'],
+  },
+  '纺织': {
+    BR: ['BR_INMETRO'],
+    MX: ['MX_NOM_TEXTO'],
+    AR: ['COMMON_LABEL_ES'],
+    CO: ['CO_SIC'],
+    CL: ['CL_SERNAC'],
+    PE: ['PE_INDECOPI'],
+  },
+  '鞋类': {
+    BR: ['BR_INMETRO'],
+    MX: ['MX_NOM_TEXTO'],
+    AR: ['COMMON_LABEL_ES'],
+    CO: ['CO_SIC'],
+    CL: ['CL_SERNAC'],
+    PE: ['PE_INDECOPI'],
+  },
+  '玩具': {
+    BR: ['BR_INMETRO'],
+    MX: ['MX_NOM_TEXTO'],
+    AR: ['AR_IRAM'],
+    CO: ['CO_SIC'],
+    CL: ['CL_SEC'],
+    PE: ['PE_INDECOPI'],
+  },
+  '家具': {
+    BR: ['BR_INMETRO'],
+    MX: ['MX_NOM_TEXTO'],
+    AR: ['COMMON_LABEL_ES'],
+    CO: ['CO_SIC'],
+    CL: ['CL_SERNAC'],
+    PE: ['PE_INDECOPI'],
+  },
+  '包袋': {
+    BR: [],
+    MX: ['MX_NOM_TEXTO'],
+    AR: ['COMMON_LABEL_ES'],
+    CO: ['CO_SIC'],
+    CL: ['CL_SERNAC'],
+    PE: ['PE_INDECOPI'],
+  },
+  '首饰': {
+    BR: [],
+    MX: ['MX_NOM_TEXTO'],
+    AR: ['COMMON_LABEL_ES'],
+    CO: ['COMMON_LABEL_ES'],
+    CL: ['COMMON_LABEL_ES'],
+    PE: ['COMMON_LABEL_ES'],
+  },
+  '运动': {
+    BR: ['BR_INMETRO'],
+    MX: ['MX_NOM_TEXTO'],
+    AR: ['COMMON_LABEL_ES'],
+    CO: ['CO_SIC'],
+    CL: ['CL_SERNAC'],
+    PE: ['PE_INDECOPI'],
+  },
+  '汽车': {
+    BR: ['BR_DENATRAN', 'BR_INMETRO'],
+    MX: ['MX_NOM_AUTO'],
+    AR: ['AR_IRAM'],
+    CO: ['CO_SIC'],
+    CL: ['CL_SEC'],
+    PE: ['PE_MTC_AUTO'],
+  },
+  '医疗': {
+    BR: ['BR_ANVISA'],
+    MX: ['MX_COFEPRIS'],
+    AR: ['AR_ANMAT'],
+    CO: ['CO_INVIMA'],
+    CL: ['CL_ISP'],
+    PE: ['PE_DIGEMID'],
+  },
+};
+
+export function getCertsForItem(item: TariffItem, countryCode: string): CertInfo[] {
+  const keys = CHAPTER_CERTS[item.chapter]?.[countryCode] ?? [];
+  return keys.map(k => CERT_DB[k]).filter(Boolean);
+}
+
 export const COUNTRIES = [
   { code: 'BR', name: '巴西', flag: '🇧🇷', currency: 'BRL' },
   { code: 'MX', name: '墨西哥', flag: '🇲🇽', currency: 'MXN' },
