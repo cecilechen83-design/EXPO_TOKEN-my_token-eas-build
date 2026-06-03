@@ -1,376 +1,812 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useRef } from "react";
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView,
-  StyleSheet, ActivityIndicator, Platform,
+  StyleSheet, ActivityIndicator, Platform, Animated,
 } from "react-native";
 import { useColors } from "@/hooks/use-colors";
 import { WebLayout } from "@/components/web-sidebar";
-import { searchTariff, calcTotal, getMainRate, COUNTRIES, FIXED_TAXES, type TariffItem } from "@/lib/tariff-data";
+import {
+  searchTariff, TAX_DETAIL, COUNTRIES,
+  calcBRDetail, calcMXDetail, calcARDetail, calcCODetail, calcCLDetail, calcPEDetail,
+  type TariffItem,
+} from "@/lib/tariff-data";
 
-const QUICK_TAGS = ["手机", "运动鞋", "T恤", "化妆品", "电视", "空调", "家具", "8517", "6404", "3304"];
-
-const COUNTRY_COLORS: Record<string, string> = {
-  BR: "#009c3b", MX: "#006847", AR: "#74acdf",
-  CO: "#d4a017", CL: "#d52b1e", PE: "#d91023",
-};
-
-function rateColor(rate: number) {
-  if (rate === 0) return "#10b981";
-  if (rate <= 5) return "#34d399";
-  if (rate <= 15) return "#f59e0b";
-  if (rate <= 25) return "#f97316";
-  return "#ef4444";
-}
+const QUICK_TAGS = [
+  { label: "智能手机", q: "智能手机" }, { label: "运动鞋", q: "运动鞋" },
+  { label: "T恤", q: "T恤" }, { label: "化妆品", q: "面霜" },
+  { label: "电视机", q: "液晶电视" }, { label: "空调", q: "空调" },
+  { label: "锂电池", q: "锂电池" }, { label: "8517.13", q: "8517.13" },
+  { label: "6404.11", q: "6404.11" }, { label: "3304", q: "3304" },
+];
 
 export default function TariffScreen() {
   const colors = useColors();
+  const [step, setStep] = useState<1 | 2 | 3>(1); // 1=搜索 2=选NCM 3=国家详情
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<TariffItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [selectedItem, setSelectedItem] = useState<TariffItem | null>(null);
+  const [selectedCountry, setSelectedCountry] = useState<string>("BR");
+  const [cifValue, setCifValue] = useState("1000");
 
   const doSearch = useCallback((q?: string) => {
     const term = (q ?? query).trim();
     if (!term) return;
     setLoading(true);
     setSearched(false);
+    setSelectedItem(null);
+    setStep(1);
     setTimeout(() => {
-      setResults(searchTariff(term));
+      const found = searchTariff(term);
+      setResults(found);
       setSearched(true);
       setLoading(false);
+      if (found.length > 0) setStep(2);
     }, 300);
   }, [query]);
 
+  const selectItem = (item: TariffItem) => {
+    setSelectedItem(item);
+    setStep(3);
+  };
+
+  const reset = () => {
+    setStep(1);
+    setResults([]);
+    setSearched(false);
+    setSelectedItem(null);
+    setQuery("");
+  };
+
   return (
     <WebLayout>
-      <ScrollView style={[styles.root, { backgroundColor: colors.background }]} keyboardShouldPersistTaps="handled">
-        {/* Header Banner */}
-        <View style={styles.banner}>
-          <Text style={styles.bannerTitle}>🌎 万国拉美查税助手</Text>
-          <Text style={styles.bannerSub}>拉美六国进口关税智能查询 · 支持商品名称 / HS编码 / 材质</Text>
+      <ScrollView
+        style={[styles.root, { backgroundColor: colors.background }]}
+        keyboardShouldPersistTaps="handled"
+      >
+        {/* Banner */}
+        <View style={[styles.banner, { backgroundColor: "#0c1a2e" }]}>
+          <View style={styles.bannerRow}>
+            <Text style={styles.bannerIcon}>🌎</Text>
+            <View>
+              <Text style={styles.bannerTitle}>万国拉美查税助手</Text>
+              <Text style={styles.bannerSub}>NCM / HS编码精准匹配 · 拉美六国全税种明细查询</Text>
+            </View>
+          </View>
           <View style={styles.flagRow}>
-            {["🇧🇷 巴西", "🇲🇽 墨西哥", "🇦🇷 阿根廷", "🇨🇴 哥伦比亚", "🇨🇱 智利", "🇵🇪 秘鲁"].map(c => (
-              <View key={c} style={styles.flagBadge}><Text style={styles.flagText}>{c}</Text></View>
+            {COUNTRIES.map(c => (
+              <View key={c.code} style={styles.flagBadge}>
+                <Text style={styles.flagText}>{c.flag} {c.name}</Text>
+              </View>
             ))}
           </View>
         </View>
 
-        {/* Search Box */}
-        <View style={[styles.searchCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-          <View style={[styles.inputRow, { borderColor: colors.border }]}>
-            <Text style={{ fontSize: 18, marginRight: 8 }}>🔍</Text>
-            <TextInput
-              style={[styles.input, { color: colors.foreground }]}
-              value={query}
-              onChangeText={setQuery}
-              onSubmitEditing={() => doSearch()}
-              placeholder="输入商品名称、HS编码或材质..."
-              placeholderTextColor={colors.muted}
-              returnKeyType="search"
-            />
-            {query.length > 0 && (
-              <TouchableOpacity onPress={() => { setQuery(""); setSearched(false); setResults([]); }}>
-                <Text style={{ color: colors.muted, fontSize: 18, padding: 4 }}>✕</Text>
+        {/* Step Indicator */}
+        <View style={[styles.stepBar, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}>
+          {[
+            { n: 1, label: "搜索品名/编码" },
+            { n: 2, label: "确认NCM编码" },
+            { n: 3, label: "查看税率详情" },
+          ].map((s, i) => (
+            <React.Fragment key={s.n}>
+              <TouchableOpacity
+                onPress={() => {
+                  if (s.n < step || (s.n === 2 && results.length > 0)) {
+                    setStep(s.n as 1 | 2 | 3);
+                    if (s.n === 1) { setResults([]); setSearched(false); }
+                  }
+                }}
+                style={styles.stepItem}
+              >
+                <View style={[
+                  styles.stepCircle,
+                  step >= s.n
+                    ? { backgroundColor: colors.primary }
+                    : { backgroundColor: colors.border }
+                ]}>
+                  <Text style={[styles.stepNum, { color: step >= s.n ? "#fff" : colors.muted }]}>
+                    {step > s.n ? "✓" : s.n}
+                  </Text>
+                </View>
+                <Text style={[
+                  styles.stepLabel,
+                  { color: step >= s.n ? colors.foreground : colors.muted },
+                ]}>{s.label}</Text>
               </TouchableOpacity>
+              {i < 2 && <View style={[styles.stepLine, { backgroundColor: step > s.n ? colors.primary : colors.border }]} />}
+            </React.Fragment>
+          ))}
+        </View>
+
+        {/* ===== STEP 1: 搜索 ===== */}
+        {step === 1 && (
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: colors.foreground }]}>
+              输入品名、材质或NCM/HS编码
+            </Text>
+
+            {/* Search Input */}
+            <View style={[styles.inputWrap, {
+              borderColor: colors.primary,
+              backgroundColor: colors.surface,
+            }]}>
+              <Text style={styles.searchIcon}>🔍</Text>
+              <TextInput
+                style={[styles.input, { color: colors.foreground }]}
+                value={query}
+                onChangeText={setQuery}
+                onSubmitEditing={() => doSearch()}
+                placeholder="例：运动鞋、棉质T恤、6404.11、锂电池..."
+                placeholderTextColor={colors.muted}
+                returnKeyType="search"
+              />
+              {query.length > 0 && (
+                <TouchableOpacity onPress={() => setQuery("")}>
+                  <Text style={[styles.clearBtn, { color: colors.muted }]}>✕</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <TouchableOpacity
+              style={[styles.searchBtn, {
+                backgroundColor: query.trim() ? colors.primary : colors.border,
+              }]}
+              onPress={() => doSearch()}
+              disabled={!query.trim() || loading}
+            >
+              {loading
+                ? <ActivityIndicator color="#fff" size="small" />
+                : <Text style={styles.searchBtnText}>查询 NCM 编码及税率</Text>
+              }
+            </TouchableOpacity>
+
+            {/* Quick Tags */}
+            <View style={styles.tagSection}>
+              <Text style={[styles.tagHint, { color: colors.muted }]}>快速查询：</Text>
+              <View style={styles.tagWrap}>
+                {QUICK_TAGS.map(t => (
+                  <TouchableOpacity
+                    key={t.q}
+                    style={[styles.tag, { borderColor: colors.border, backgroundColor: colors.surface }]}
+                    onPress={() => { setQuery(t.q); doSearch(t.q); }}
+                  >
+                    <Text style={[styles.tagText, { color: colors.foreground }]}>{t.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            {/* Help */}
+            <View style={[styles.helpBox, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+              <Text style={[styles.helpTitle, { color: colors.foreground }]}>📖 查询说明</Text>
+              {[
+                { icon: "🏷️", t: "HS/NCM编码", d: "直接输入编码，如 8517.13（手机）、6404.11（运动鞋）" },
+                { icon: "📦", t: "商品名称", d: "中文品名，如 液晶电视、洗衣机、背包" },
+                { icon: "🧵", t: "材质描述", d: "如"棉质T恤"、"皮革手提包"、"铝合金框架"" },
+              ].map((h, i) => (
+                <View key={i} style={styles.helpRow}>
+                  <Text style={{ fontSize: 18, marginRight: 10 }}>{h.icon}</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.helpItemTitle, { color: colors.foreground }]}>{h.t}</Text>
+                    <Text style={[styles.helpItemDesc, { color: colors.muted }]}>{h.d}</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+
+        {/* ===== STEP 2: 选NCM ===== */}
+        {step === 2 && searched && (
+          <View style={styles.section}>
+            <View style={styles.stepHeader}>
+              <Text style={[styles.sectionTitle, { color: colors.foreground }]}>
+                找到 {results.length} 个匹配的NCM/HS编码
+              </Text>
+              <TouchableOpacity onPress={reset} style={[styles.backBtn, { borderColor: colors.border }]}>
+                <Text style={[styles.backBtnText, { color: colors.muted }]}>← 重新搜索</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={[styles.stepHint, { color: colors.muted }]}>
+              请选择与您商品最匹配的NCM/HS编码 →
+            </Text>
+
+            {results.length === 0 ? (
+              <View style={styles.emptyBox}>
+                <Text style={{ fontSize: 40 }}>🔎</Text>
+                <Text style={[styles.emptyText, { color: colors.foreground }]}>未找到匹配结果</Text>
+                <Text style={[styles.emptyHint, { color: colors.muted }]}>请尝试更换关键词或直接输入HS编码</Text>
+              </View>
+            ) : (
+              results.map(item => (
+                <TouchableOpacity
+                  key={item.hs}
+                  style={[styles.resultCard, { backgroundColor: colors.surface, borderColor: colors.border }]}
+                  onPress={() => selectItem(item)}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.resultCardInner}>
+                    <View style={[styles.hsBadge, { backgroundColor: colors.primary }]}>
+                      <Text style={styles.hsBadgeText}>{item.hs}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.resultName, { color: colors.foreground }]}>{item.name}</Text>
+                      <Text style={[styles.resultNameEn, { color: colors.muted }]}>{item.nameEn}</Text>
+                      <View style={styles.resultMeta}>
+                        <View style={[styles.chapterTag, { backgroundColor: colors.primary + "15" }]}>
+                          <Text style={[styles.chapterText, { color: colors.primary }]}>{item.chapter}</Text>
+                        </View>
+                        <Text style={[styles.kwText, { color: colors.muted }]}>
+                          {item.keywords.slice(0, 3).join("・")}
+                        </Text>
+                      </View>
+                    </View>
+                    {/* Mini rate preview */}
+                    <View style={styles.miniRates}>
+                      {COUNTRIES.slice(0, 3).map(c => {
+                        const r = c.code === 'BR' ? item.BR.ii
+                          : c.code === 'MX' ? item.MX.igi
+                          : (item as any)[c.code]?.arancel ?? 0;
+                        return (
+                          <View key={c.code} style={styles.miniRate}>
+                            <Text style={styles.miniFlag}>{c.flag}</Text>
+                            <Text style={[styles.miniRateVal, { color: r === 0 ? "#10b981" : r >= 25 ? "#ef4444" : "#f59e0b" }]}>
+                              {r}%
+                            </Text>
+                          </View>
+                        );
+                      })}
+                      <Text style={[styles.selectArrow, { color: colors.primary }]}>→</Text>
+                    </View>
+                  </View>
+                </TouchableOpacity>
+              ))
             )}
           </View>
+        )}
 
-          <TouchableOpacity
-            style={[styles.searchBtn, { backgroundColor: colors.primary, opacity: query.trim() ? 1 : 0.5 }]}
-            onPress={() => doSearch()}
-            disabled={!query.trim() || loading}
-          >
-            <Text style={styles.searchBtnText}>{loading ? "查询中..." : "查询税率"}</Text>
-          </TouchableOpacity>
+        {/* ===== STEP 3: 国家税率详情 ===== */}
+        {step === 3 && selectedItem && (
+          <View style={styles.section}>
+            {/* Selected Item Header */}
+            <View style={styles.stepHeader}>
+              <TouchableOpacity onPress={() => setStep(2)} style={[styles.backBtn, { borderColor: colors.border }]}>
+                <Text style={[styles.backBtnText, { color: colors.muted }]}>← 返回编码列表</Text>
+              </TouchableOpacity>
+            </View>
 
-          {/* Quick Tags */}
-          <View style={styles.tagRow}>
-            <Text style={[styles.tagHint, { color: colors.muted }]}>快速：</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              {QUICK_TAGS.map(tag => (
+            <View style={[styles.selectedItemCard, { backgroundColor: colors.surface, borderColor: colors.primary + "50" }]}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                <View style={[styles.hsBadge, { backgroundColor: colors.primary }]}>
+                  <Text style={styles.hsBadgeText}>{selectedItem.hs}</Text>
+                </View>
+                <View style={[styles.chapterTag, { backgroundColor: colors.primary + "15" }]}>
+                  <Text style={[styles.chapterText, { color: colors.primary }]}>{selectedItem.chapter}</Text>
+                </View>
+              </View>
+              <Text style={[styles.selectedName, { color: colors.foreground }]}>{selectedItem.name}</Text>
+              <Text style={[styles.selectedNameEn, { color: colors.muted }]}>{selectedItem.nameEn}</Text>
+            </View>
+
+            {/* CIF Input */}
+            <View style={[styles.cifRow, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+              <Text style={[styles.cifLabel, { color: colors.foreground }]}>模拟计税货值（USD）：</Text>
+              <View style={[styles.cifInput, { borderColor: colors.border }]}>
+                <Text style={[styles.cifPrefix, { color: colors.muted }]}>$</Text>
+                <TextInput
+                  style={[styles.cifField, { color: colors.foreground }]}
+                  value={cifValue}
+                  onChangeText={v => setCifValue(v.replace(/[^0-9]/g, ''))}
+                  keyboardType="numeric"
+                  placeholder="1000"
+                  placeholderTextColor={colors.muted}
+                />
+                <Text style={[styles.cifSuffix, { color: colors.muted }]}>CIF</Text>
+              </View>
+            </View>
+
+            {/* Country Selector */}
+            <Text style={[styles.sectionTitle, { color: colors.foreground, marginBottom: 10 }]}>
+              选择目的国查看完整税率：
+            </Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.countryTabs}>
+              {COUNTRIES.map(c => (
                 <TouchableOpacity
-                  key={tag}
-                  style={[styles.tag, { borderColor: colors.border, backgroundColor: colors.background }]}
-                  onPress={() => { setQuery(tag); doSearch(tag); }}
+                  key={c.code}
+                  onPress={() => setSelectedCountry(c.code)}
+                  style={[
+                    styles.countryTab,
+                    {
+                      borderColor: selectedCountry === c.code ? colors.primary : colors.border,
+                      backgroundColor: selectedCountry === c.code ? colors.primary + "12" : colors.surface,
+                    }
+                  ]}
                 >
-                  <Text style={[styles.tagText, { color: colors.foreground }]}>{tag}</Text>
+                  <Text style={styles.countryTabFlag}>{c.flag}</Text>
+                  <Text style={[styles.countryTabName, {
+                    color: selectedCountry === c.code ? colors.primary : colors.foreground,
+                    fontWeight: selectedCountry === c.code ? "700" : "400",
+                  }]}>{c.name}</Text>
                 </TouchableOpacity>
               ))}
             </ScrollView>
-          </View>
-        </View>
 
-        {/* Loading */}
-        {loading && (
-          <View style={styles.centerBox}>
-            <ActivityIndicator size="large" color={colors.primary} />
-            <Text style={[styles.hint, { color: colors.muted }]}>正在查询税率数据库...</Text>
+            {/* Full Tax Detail */}
+            <TaxDetailPanel
+              item={selectedItem}
+              countryCode={selectedCountry}
+              colors={colors}
+              cif={parseFloat(cifValue) || 1000}
+            />
+
+            {/* All Countries Summary */}
+            <View style={[styles.summaryCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+              <Text style={[styles.summaryTitle, { color: colors.foreground }]}>六国关税率一览</Text>
+              <View style={styles.summaryGrid}>
+                {COUNTRIES.map(c => {
+                  const rate = c.code === 'BR' ? selectedItem.BR.ii
+                    : c.code === 'MX' ? selectedItem.MX.igi
+                    : (selectedItem as any)[c.code]?.arancel ?? 0;
+                  const detail = TAX_DETAIL[c.code as keyof typeof TAX_DETAIL];
+                  const cif = parseFloat(cifValue) || 1000;
+                  let effective = 0;
+                  if (c.code === 'BR') effective = calcBRDetail(selectedItem, cif).effective_rate;
+                  else if (c.code === 'MX') effective = calcMXDetail(selectedItem, cif).effective_rate;
+                  else if (c.code === 'AR') effective = calcARDetail(selectedItem, cif).effective_rate;
+                  else if (c.code === 'CO') effective = calcCODetail(selectedItem, cif).effective_rate;
+                  else if (c.code === 'CL') effective = calcCLDetail(selectedItem, cif).effective_rate;
+                  else if (c.code === 'PE') effective = calcPEDetail(selectedItem, cif).effective_rate;
+
+                  const isSelected = selectedCountry === c.code;
+                  return (
+                    <TouchableOpacity
+                      key={c.code}
+                      onPress={() => setSelectedCountry(c.code)}
+                      style={[styles.summaryItem, {
+                        borderColor: isSelected ? colors.primary : colors.border,
+                        backgroundColor: isSelected ? colors.primary + "08" : "transparent",
+                      }]}
+                    >
+                      <Text style={styles.summaryFlag}>{c.flag}</Text>
+                      <Text style={[styles.summaryCountry, { color: colors.foreground }]}>{c.name}</Text>
+                      <Text style={[styles.summaryRate, {
+                        color: rate === 0 ? "#10b981" : rate >= 25 ? "#ef4444" : rate >= 15 ? "#f97316" : "#f59e0b"
+                      }]}>{rate}%</Text>
+                      <Text style={[styles.summaryRateLabel, { color: colors.muted }]}>关税</Text>
+                      <Text style={[styles.summaryEffective, { color: colors.muted }]}>综合≈{effective.toFixed(0)}%</Text>
+                      {(detail as any).ftaNote && (
+                        <Text style={styles.ftaBadge}>FTA</Text>
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+
+            {/* Disclaimer */}
+            <View style={[styles.disclaimer, { borderColor: colors.border }]}>
+              <Text style={[styles.disclaimerText, { color: colors.muted }]}>
+                ⚠️ 以上税率为2025年MFN最惠国税率，仅供参考。实际税率可能因贸易协定、反倾销税、特殊监管规定而不同，正式报关前请向专业报关行确认。
+              </Text>
+            </View>
           </View>
         )}
 
-        {/* No Results */}
-        {searched && !loading && results.length === 0 && (
-          <View style={styles.centerBox}>
-            <Text style={{ fontSize: 40, marginBottom: 12 }}>🔎</Text>
-            <Text style={[styles.hint, { color: colors.foreground, fontWeight: "600" }]}>未找到"{query}"的税率信息</Text>
-            <Text style={[styles.hint, { color: colors.muted, marginTop: 4 }]}>请尝试更换关键词或直接输入HS编码</Text>
-          </View>
-        )}
-
-        {/* Results */}
-        {searched && !loading && results.length > 0 && (
-          <View style={styles.resultSection}>
-            <Text style={[styles.resultCount, { color: colors.primary }]}>
-              找到 {results.length} 个匹配商品
-            </Text>
-            {results.map((item) => (
-              <ResultCard
-                key={item.hs}
-                item={item}
-                colors={colors}
-                expanded={expanded === item.hs}
-                onToggle={() => setExpanded(expanded === item.hs ? null : item.hs)}
-              />
-            ))}
-          </View>
-        )}
-
-        {/* Help */}
-        {!searched && !loading && <HelpSection colors={colors} />}
-
-        {/* Disclaimer */}
-        <View style={[styles.disclaimer, { borderColor: colors.border }]}>
-          <Text style={[styles.disclaimerText, { color: colors.muted }]}>
-            ⚠️ 税率数据仅供参考（2025年MFN税率），实际税率以各国海关官方公布为准。
-          </Text>
-        </View>
+        <View style={{ height: 40 }} />
       </ScrollView>
     </WebLayout>
   );
 }
 
-function ResultCard({ item, colors, expanded, onToggle }: {
-  item: TariffItem; colors: any; expanded: boolean; onToggle: () => void;
+// ============ 国家税率详情面板 ============
+function TaxDetailPanel({ item, countryCode, colors, cif }: {
+  item: TariffItem; countryCode: string; colors: any; cif: number;
 }) {
-  return (
-    <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-      {/* Card Header */}
-      <TouchableOpacity style={styles.cardHeader} onPress={onToggle} activeOpacity={0.7}>
-        <View style={styles.cardHeaderLeft}>
-          <View style={[styles.hsBadge, { backgroundColor: colors.primary }]}>
-            <Text style={styles.hsBadgeText}>{item.hs}</Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.itemName, { color: colors.foreground }]}>{item.name}</Text>
-            <Text style={[styles.itemKw, { color: colors.muted }]} numberOfLines={1}>
-              {item.keywords.slice(0, 4).join("、")}
-            </Text>
-          </View>
-        </View>
-        <Text style={[styles.chevron, { color: colors.muted }]}>{expanded ? "▲" : "▼"}</Text>
-      </TouchableOpacity>
+  const detail = TAX_DETAIL[countryCode as keyof typeof TAX_DETAIL];
+  if (!detail) return null;
 
-      {/* Rate Summary Row */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.rateRow}>
-        {COUNTRIES.map(c => {
-          const rate = getMainRate(item, c.code);
-          const color = rateColor(rate);
-          return (
-            <View key={c.code} style={[styles.rateChip, { borderColor: color + "50", backgroundColor: color + "15" }]}>
-              <Text style={styles.rateFlag}>{c.flag}</Text>
-              <Text style={[styles.rateVal, { color }]}>{rate}%</Text>
-              <Text style={[styles.rateName, { color: colors.muted }]}>{c.name}</Text>
-            </View>
-          );
-        })}
-      </ScrollView>
-
-      {/* Expanded Detail */}
-      {expanded && (
-        <View style={styles.detailSection}>
-          {COUNTRIES.map(c => (
-            <CountryDetail key={c.code} countryCode={c.code} countryName={c.name} flag={c.flag} item={item} colors={colors} />
-          ))}
-        </View>
-      )}
-    </View>
-  );
-}
-
-function CountryDetail({ countryCode, countryName, flag, item, colors }: {
-  countryCode: string; countryName: string; flag: string; item: TariffItem; colors: any;
-}) {
-  const countryColor = COUNTRY_COLORS[countryCode] ?? "#888";
-  const fixed = FIXED_TAXES[countryCode as keyof typeof FIXED_TAXES];
-  const mainRate = getMainRate(item, countryCode);
-  const total = calcTotal(item, countryCode);
-
-  let rows: { label: string; value: string; main?: boolean }[] = [];
+  let rows: { label: string; basis: string; rate: string; amount: string; highlight?: boolean; note?: string; isTotal?: boolean }[] = [];
+  let calcResult: any = {};
 
   if (countryCode === 'BR') {
-    const d = item.BR;
+    calcResult = calcBRDetail(item, cif);
     rows = [
-      { label: "II 进口税", value: `${d.ii}%`, main: true },
-      { label: "IPI 工业品税", value: `${d.ipi}%` },
-      { label: "PIS", value: `${(fixed as any).pis}%` },
-      { label: "COFINS", value: `${(fixed as any).cofins}%` },
-      { label: "ICMS（含税基调整）", value: `≈${((fixed as any).icms * (1 + (d.ii + d.ipi + (fixed as any).pis + (fixed as any).cofins) / 100)).toFixed(1)}%` },
+      {
+        label: "II — 进口税", basis: `CIF $${cif.toLocaleString()}`,
+        rate: `${item.BR.ii}%`, amount: `$${calcResult.II.toFixed(2)}`, highlight: true,
+        note: "直接对CIF征收",
+      },
+      {
+        label: "IPI — 工业品税", basis: `CIF + II = $${(cif + calcResult.II).toFixed(2)}`,
+        rate: `${item.BR.ipi}%`, amount: `$${calcResult.IPI.toFixed(2)}`,
+        note: item.BR.ipiNote ?? "对CIF+II征收",
+      },
+      {
+        label: "PIS — 社会统合税", basis: `CIF+II+IPI = $${(cif + calcResult.II + calcResult.IPI).toFixed(2)}`,
+        rate: "2.1%", amount: `$${calcResult.PIS.toFixed(2)}`,
+      },
+      {
+        label: "COFINS — 社会贡献税", basis: `CIF+II+IPI = $${(cif + calcResult.II + calcResult.IPI).toFixed(2)}`,
+        rate: "9.75%", amount: `$${calcResult.COFINS.toFixed(2)}`,
+      },
+      {
+        label: "ICMS — 州流通税（SP州）", basis: "含税倒算法（税率18%）",
+        rate: "18%（含税）", amount: `$${calcResult.ICMS.toFixed(2)}`,
+        note: "各州不同，以圣保罗州18%为参考；倒算后等效约21.95%",
+      },
+      {
+        label: "合计税费", basis: "",
+        rate: `综合税负 ${calcResult.effective_rate.toFixed(1)}%`,
+        amount: `$${(calcResult.total - cif).toFixed(2)}`,
+        isTotal: true,
+      },
+      {
+        label: "到岸总成本（估算）", basis: "",
+        rate: "", amount: `$${calcResult.total.toFixed(2)}`, isTotal: true,
+      },
     ];
   } else if (countryCode === 'MX') {
+    calcResult = calcMXDetail(item, cif);
     rows = [
-      { label: "IGI 进口关税", value: `${item.MX.igi}%`, main: true },
-      { label: "IVA 增值税", value: `${(fixed as any).iva}%` },
+      {
+        label: "IGI — 进口关税", basis: `FOB/CIF $${cif.toLocaleString()}`,
+        rate: `${item.MX.igi}%`, amount: `$${calcResult.IGI.toFixed(2)}`, highlight: true,
+        note: "墨西哥以FOB为税基",
+      },
+      {
+        label: "DTA — 海关手续费", basis: `FOB $${cif.toLocaleString()}`,
+        rate: "0.8%", amount: `$${calcResult.DTA.toFixed(2)}`,
+        note: "最低约$422 MXN",
+      },
+      {
+        label: "IVA — 增值税", basis: `FOB+IGI+DTA = $${(cif + calcResult.IGI + calcResult.DTA).toFixed(2)}`,
+        rate: "16%", amount: `$${calcResult.IVA.toFixed(2)}`,
+      },
+      {
+        label: "合计税费", basis: "",
+        rate: `综合税负 ${calcResult.effective_rate.toFixed(1)}%`,
+        amount: `$${(calcResult.total - cif).toFixed(2)}`, isTotal: true,
+      },
+      {
+        label: "到岸总成本（估算）", basis: "",
+        rate: "", amount: `$${calcResult.total.toFixed(2)}`, isTotal: true,
+      },
     ];
   } else if (countryCode === 'AR') {
+    calcResult = calcARDetail(item, cif);
     rows = [
-      { label: "进口关税", value: `${item.AR.arancel}%`, main: true },
-      { label: "IVA 增值税", value: `${(fixed as any).iva}%` },
-      { label: "统计税", value: `${(fixed as any).estadistica}%` },
+      {
+        label: "进口关税（Arancel）", basis: `CIF $${cif.toLocaleString()}`,
+        rate: `${item.AR.arancel}%`, amount: `$${calcResult.AR.toFixed(2)}`, highlight: true,
+      },
+      {
+        label: "统计税（Estadística）", basis: `CIF $${cif.toLocaleString()}`,
+        rate: "3%", amount: `$${calcResult.EST.toFixed(2)}`,
+        note: "上限$500美元",
+      },
+      {
+        label: "IVA — 增值税", basis: `CIF+关税+统计税`,
+        rate: "21%", amount: `$${calcResult.IVA.toFixed(2)}`,
+      },
+      {
+        label: "附加增值税（IVA Adicional）", basis: `CIF+关税+统计税`,
+        rate: "10%", amount: `$${calcResult.IVA_ADI.toFixed(2)}`,
+        note: "注册进口商10%，非注册20%",
+      },
+      {
+        label: "预缴所得税（Ganancias）", basis: `CIF+关税+统计税`,
+        rate: "3%", amount: `$${calcResult.GANANCIAS.toFixed(2)}`,
+        note: "注册进口商3%，可年度抵扣",
+      },
+      {
+        label: "合计税费", basis: "",
+        rate: `综合税负 ${calcResult.effective_rate.toFixed(1)}%`,
+        amount: `$${(calcResult.total - cif).toFixed(2)}`, isTotal: true,
+      },
+      {
+        label: "到岸总成本（估算）", basis: "",
+        rate: "", amount: `$${calcResult.total.toFixed(2)}`, isTotal: true,
+      },
     ];
   } else if (countryCode === 'CO') {
+    calcResult = calcCODetail(item, cif);
     rows = [
-      { label: "进口关税", value: `${item.CO.arancel}%`, main: true },
-      { label: "IVA 增值税", value: `${(fixed as any).iva}%` },
+      {
+        label: "进口关税（Arancel）", basis: `CIF $${cif.toLocaleString()}`,
+        rate: `${item.CO.arancel}%`, amount: `$${calcResult.AR.toFixed(2)}`, highlight: true,
+      },
+      {
+        label: "IVA — 增值税", basis: `CIF + 关税`,
+        rate: "19%", amount: `$${calcResult.IVA.toFixed(2)}`,
+        note: "标准19%，部分商品5%或免税",
+      },
+      {
+        label: "合计税费", basis: "",
+        rate: `综合税负 ${calcResult.effective_rate.toFixed(1)}%`,
+        amount: `$${(calcResult.total - cif).toFixed(2)}`, isTotal: true,
+      },
+      {
+        label: "到岸总成本（估算）", basis: "",
+        rate: "", amount: `$${calcResult.total.toFixed(2)}`, isTotal: true,
+      },
     ];
   } else if (countryCode === 'CL') {
+    calcResult = calcCLDetail(item, cif);
     rows = [
-      { label: "进口关税", value: `${item.CL.arancel}%`, main: true },
-      { label: "IVA 增值税", value: `${(fixed as any).iva}%` },
+      {
+        label: "进口关税（Arancel）", basis: `CIF $${cif.toLocaleString()}`,
+        rate: `${item.CL.arancel}%`, amount: `$${calcResult.AR.toFixed(2)}`, highlight: true,
+        note: "MFN税率6%；持中智FTA原产地证可降至0%",
+      },
+      {
+        label: "IVA — 增值税", basis: `CIF + 关税`,
+        rate: "19%", amount: `$${calcResult.IVA.toFixed(2)}`,
+      },
+      {
+        label: "合计税费（MFN）", basis: "",
+        rate: `综合税负 ${calcResult.effective_rate.toFixed(1)}%`,
+        amount: `$${(calcResult.total - cif).toFixed(2)}`, isTotal: true,
+      },
+      {
+        label: "FTA优惠（中智协定）", basis: "需提供Form F原产地证书",
+        rate: "关税 → 0%", amount: `节省 $${calcResult.AR.toFixed(2)}`,
+        note: "持原产地证则综合税负约19%",
+      },
+      {
+        label: "到岸总成本（估算MFN）", basis: "",
+        rate: "", amount: `$${calcResult.total.toFixed(2)}`, isTotal: true,
+      },
     ];
   } else if (countryCode === 'PE') {
+    calcResult = calcPEDetail(item, cif);
     rows = [
-      { label: "进口关税", value: `${item.PE.arancel}%`, main: true },
-      { label: "IGV（16%）+ IPM（2%）", value: "18%" },
+      {
+        label: "进口关税（Derecho Arancelario）", basis: `CIF $${cif.toLocaleString()}`,
+        rate: `${item.PE.arancel}%`, amount: `$${calcResult.AR.toFixed(2)}`, highlight: true,
+        note: "税率分0/4/6/11%档",
+      },
+      {
+        label: "IGV — 一般销售税", basis: `CIF + 关税`,
+        rate: "16%", amount: `$${calcResult.IGV.toFixed(2)}`,
+      },
+      {
+        label: "IPM — 市政促进税", basis: `CIF + 关税`,
+        rate: "2%", amount: `$${calcResult.IPM.toFixed(2)}`,
+        note: "IGV+IPM合并征收=18%",
+      },
+      {
+        label: "合计税费", basis: "",
+        rate: `综合税负 ${calcResult.effective_rate.toFixed(1)}%`,
+        amount: `$${(calcResult.total - cif).toFixed(2)}`, isTotal: true,
+      },
+      {
+        label: "FTA优惠（中秘协定）", basis: "需提供原产地证书",
+        rate: "关税可减免", amount: "视具体编码而定",
+        note: "部分商品已降至0%",
+      },
+      {
+        label: "到岸总成本（估算）", basis: "",
+        rate: "", amount: `$${calcResult.total.toFixed(2)}`, isTotal: true,
+      },
     ];
   }
 
   return (
-    <View style={[styles.countryCard, { borderLeftColor: countryColor }]}>
-      <View style={styles.countryHeader}>
-        <Text style={{ fontSize: 22 }}>{flag}</Text>
-        <Text style={[styles.countryName, { color: colors.foreground }]}>{countryName}</Text>
-        <View style={{ flex: 1 }} />
-        <Text style={[styles.mainRate, { color: rateColor(mainRate) }]}>{mainRate}%</Text>
-        <Text style={[styles.mainRateLabel, { color: colors.muted }]}>关税</Text>
-      </View>
-      {rows.map((r, i) => (
-        <View key={i} style={[styles.taxRow, { borderBottomColor: colors.border }]}>
-          <Text style={[styles.taxLabel, { color: r.main ? colors.foreground : colors.muted, fontWeight: r.main ? "600" : "400" }]}>
-            {r.label}
-          </Text>
-          <Text style={[styles.taxValue, { color: r.main ? rateColor(mainRate) : colors.foreground }]}>
-            {r.value}
-          </Text>
+    <View style={[styles.detailCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+      {/* Country Header */}
+      <View style={[styles.detailHeader, { borderBottomColor: colors.border }]}>
+        <Text style={{ fontSize: 28 }}>
+          {COUNTRIES.find(c => c.code === countryCode)?.flag}
+        </Text>
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.detailCountryName, { color: colors.foreground }]}>{detail.name}</Text>
+          <Text style={[styles.detailSystem, { color: colors.muted }]}>{detail.system}</Text>
         </View>
-      ))}
-      <View style={styles.totalRow}>
-        <Text style={[styles.totalLabel, { color: colors.foreground }]}>综合税负（约）</Text>
-        <Text style={[styles.totalValue, { color: countryColor }]}>{total.toFixed(1)}%</Text>
-      </View>
-    </View>
-  );
-}
-
-function HelpSection({ colors }: { colors: any }) {
-  return (
-    <View style={styles.helpSection}>
-      <Text style={[styles.helpTitle, { color: colors.foreground }]}>💡 使用说明</Text>
-      {[
-        { icon: "🏷️", t: "HS编码查询", d: "直接输入编码，如 8517（手机）、6404（运动鞋）" },
-        { icon: "📦", t: "商品名称", d: "输入中文名称，如 空调、洗衣机、化妆品" },
-        { icon: "🧵", t: "材质查询", d: "输入材质，如 棉、皮革、铝、塑料" },
-      ].map((h, i) => (
-        <View key={i} style={[styles.helpItem, { borderColor: colors.border }]}>
-          <Text style={{ fontSize: 22, marginRight: 10 }}>{h.icon}</Text>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.helpItemTitle, { color: colors.foreground }]}>{h.t}</Text>
-            <Text style={[styles.helpItemDesc, { color: colors.muted }]}>{h.d}</Text>
+        {(detail as any).ftaNote && (
+          <View style={styles.ftaBox}>
+            <Text style={styles.ftaText}>{(detail as any).ftaNote}</Text>
           </View>
+        )}
+      </View>
+
+      {/* Tax Table */}
+      <View style={styles.taxTable}>
+        {/* Header */}
+        <View style={[styles.taxTableHeader, { backgroundColor: colors.primary + "10", borderBottomColor: colors.border }]}>
+          <Text style={[styles.taxCol1, styles.taxHeader, { color: colors.foreground }]}>税种</Text>
+          <Text style={[styles.taxCol2, styles.taxHeader, { color: colors.foreground }]}>计税基础</Text>
+          <Text style={[styles.taxCol3, styles.taxHeader, { color: colors.foreground }]}>税率</Text>
+          <Text style={[styles.taxCol4, styles.taxHeader, { color: colors.foreground }]}>税额(USD)</Text>
         </View>
-      ))}
+
+        {rows.map((row, i) => (
+          <View
+            key={i}
+            style={[
+              styles.taxRow,
+              { borderBottomColor: colors.border },
+              row.isTotal && { backgroundColor: colors.primary + "08" },
+            ]}
+          >
+            <View style={styles.taxCol1}>
+              <Text style={[
+                styles.taxLabel,
+                { color: row.highlight ? colors.primary : row.isTotal ? colors.foreground : colors.foreground },
+                row.highlight && { fontWeight: "700" },
+                row.isTotal && { fontWeight: "700" },
+              ]}>{row.label}</Text>
+              {row.note && <Text style={[styles.taxNote, { color: colors.muted }]}>{row.note}</Text>}
+            </View>
+            <Text style={[styles.taxCol2, styles.taxBasis, { color: colors.muted }]}>{row.basis}</Text>
+            <Text style={[
+              styles.taxCol3, styles.taxRate,
+              { color: row.highlight ? "#f59e0b" : row.isTotal ? colors.primary : colors.foreground },
+              (row.highlight || row.isTotal) && { fontWeight: "700" },
+            ]}>{row.rate}</Text>
+            <Text style={[
+              styles.taxCol4, styles.taxAmount,
+              { color: row.isTotal ? colors.primary : colors.foreground },
+              row.isTotal && { fontWeight: "800" },
+            ]}>{row.amount}</Text>
+          </View>
+        ))}
+      </View>
+
+      {/* Calc Note */}
+      <View style={[styles.calcNoteBox, { backgroundColor: colors.primary + "08", borderColor: colors.primary + "20" }]}>
+        <Text style={[styles.calcNoteText, { color: colors.muted }]}>
+          💡 {detail.calcNote}
+        </Text>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  banner: {
-    padding: 20, paddingBottom: 16,
-    background: undefined,
-    backgroundColor: "#0f172a",
-  },
-  bannerTitle: { color: "#fff", fontSize: 20, fontWeight: "800", marginBottom: 4 },
-  bannerSub: { color: "rgba(255,255,255,0.55)", fontSize: 12, marginBottom: 10 },
+  banner: { padding: 16, paddingBottom: 12 },
+  bannerRow: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 10 },
+  bannerIcon: { fontSize: 36 },
+  bannerTitle: { color: "#fff", fontSize: 20, fontWeight: "800" },
+  bannerSub: { color: "rgba(255,255,255,0.5)", fontSize: 12, marginTop: 2 },
   flagRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   flagBadge: { backgroundColor: "rgba(255,255,255,0.1)", borderRadius: 12, paddingHorizontal: 10, paddingVertical: 3 },
   flagText: { color: "rgba(255,255,255,0.75)", fontSize: 11, fontWeight: "500" },
 
-  searchCard: { margin: 12, borderRadius: 14, borderWidth: 1, padding: 14 },
-  inputRow: {
-    flexDirection: "row", alignItems: "center",
-    borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6, marginBottom: 10,
+  stepBar: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    paddingVertical: 14, paddingHorizontal: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  input: { flex: 1, fontSize: 15, paddingVertical: Platform.OS === "ios" ? 8 : 4 },
-  searchBtn: { borderRadius: 10, paddingVertical: 12, alignItems: "center", marginBottom: 10 },
+  stepItem: { alignItems: "center", flex: 1 },
+  stepCircle: { width: 26, height: 26, borderRadius: 13, alignItems: "center", justifyContent: "center", marginBottom: 4 },
+  stepNum: { fontSize: 12, fontWeight: "700" },
+  stepLabel: { fontSize: 11, textAlign: "center" },
+  stepLine: { flex: 1, height: 1.5, marginBottom: 16 },
+
+  section: { padding: 14 },
+  stepHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 4 },
+  sectionTitle: { fontSize: 15, fontWeight: "700", marginBottom: 12 },
+  stepHint: { fontSize: 12, marginBottom: 12 },
+  backBtn: { borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 5 },
+  backBtnText: { fontSize: 12 },
+
+  inputWrap: {
+    flexDirection: "row", alignItems: "center",
+    borderWidth: 1.5, borderRadius: 12, paddingHorizontal: 12,
+    paddingVertical: Platform.OS === "ios" ? 10 : 6, marginBottom: 10,
+  },
+  searchIcon: { fontSize: 18, marginRight: 8 },
+  input: { flex: 1, fontSize: 15, paddingVertical: 4 },
+  clearBtn: { fontSize: 18, padding: 4 },
+  searchBtn: { borderRadius: 10, paddingVertical: 13, alignItems: "center", marginBottom: 14 },
   searchBtnText: { color: "#fff", fontWeight: "700", fontSize: 15 },
-  tagRow: { flexDirection: "row", alignItems: "center" },
-  tagHint: { fontSize: 12, marginRight: 6 },
-  tag: { borderWidth: 1, borderRadius: 16, paddingHorizontal: 12, paddingVertical: 4, marginRight: 6 },
+
+  tagSection: { marginBottom: 16 },
+  tagHint: { fontSize: 12, marginBottom: 6 },
+  tagWrap: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  tag: { borderWidth: 1, borderRadius: 16, paddingHorizontal: 12, paddingVertical: 5 },
   tagText: { fontSize: 12 },
 
-  centerBox: { alignItems: "center", paddingVertical: 40 },
-  hint: { fontSize: 14, marginTop: 8 },
-
-  resultSection: { paddingHorizontal: 12, paddingBottom: 8 },
-  resultCount: { fontSize: 13, fontWeight: "700", marginBottom: 10 },
-
-  card: { borderRadius: 14, borderWidth: 1, marginBottom: 12, overflow: "hidden" },
-  cardHeader: {
-    flexDirection: "row", alignItems: "center", padding: 14,
-    justifyContent: "space-between",
-  },
-  cardHeaderLeft: { flexDirection: "row", alignItems: "center", flex: 1, gap: 10 },
-  hsBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
-  hsBadgeText: { color: "#fff", fontSize: 12, fontWeight: "700" },
-  itemName: { fontSize: 14, fontWeight: "700" },
-  itemKw: { fontSize: 11, marginTop: 2 },
-  chevron: { fontSize: 12, marginLeft: 8 },
-
-  rateRow: { paddingHorizontal: 12, paddingBottom: 12 },
-  rateChip: {
-    borderWidth: 1, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6,
-    marginRight: 8, alignItems: "center", minWidth: 62,
-  },
-  rateFlag: { fontSize: 16, marginBottom: 2 },
-  rateVal: { fontSize: 15, fontWeight: "800" },
-  rateName: { fontSize: 10, marginTop: 1 },
-
-  detailSection: { padding: 12, paddingTop: 4, gap: 10 },
-  countryCard: {
-    borderRadius: 10, borderLeftWidth: 3, padding: 12,
-    backgroundColor: "rgba(0,0,0,0.03)",
-  },
-  countryHeader: { flexDirection: "row", alignItems: "center", marginBottom: 8, gap: 8 },
-  countryName: { fontSize: 14, fontWeight: "700" },
-  mainRate: { fontSize: 20, fontWeight: "800" },
-  mainRateLabel: { fontSize: 10, marginLeft: 2, alignSelf: "flex-end", marginBottom: 2 },
-  taxRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 4, borderBottomWidth: StyleSheet.hairlineWidth },
-  taxLabel: { fontSize: 12 },
-  taxValue: { fontSize: 13, fontWeight: "600" },
-  totalRow: {
-    flexDirection: "row", justifyContent: "space-between",
-    alignItems: "center", marginTop: 8, paddingTop: 6,
-  },
-  totalLabel: { fontSize: 13, fontWeight: "600" },
-  totalValue: { fontSize: 18, fontWeight: "800" },
-
-  helpSection: { margin: 12 },
-  helpTitle: { fontSize: 15, fontWeight: "700", marginBottom: 10 },
-  helpItem: { flexDirection: "row", alignItems: "flex-start", padding: 12, borderRadius: 10, borderWidth: 1, marginBottom: 8 },
+  helpBox: { borderRadius: 12, borderWidth: 1, padding: 14 },
+  helpTitle: { fontSize: 14, fontWeight: "700", marginBottom: 10 },
+  helpRow: { flexDirection: "row", alignItems: "flex-start", marginBottom: 8 },
   helpItemTitle: { fontSize: 13, fontWeight: "600", marginBottom: 2 },
-  helpItemDesc: { fontSize: 12 },
+  helpItemDesc: { fontSize: 12, lineHeight: 18 },
 
-  disclaimer: { margin: 12, padding: 12, borderRadius: 10, borderWidth: 1, marginBottom: 24 },
-  disclaimerText: { fontSize: 11, lineHeight: 16 },
+  emptyBox: { alignItems: "center", paddingVertical: 40 },
+  emptyText: { fontSize: 16, fontWeight: "600", marginTop: 12 },
+  emptyHint: { fontSize: 13, marginTop: 4 },
+
+  resultCard: { borderRadius: 12, borderWidth: 1, marginBottom: 8, overflow: "hidden" },
+  resultCardInner: { padding: 14, flexDirection: "row", alignItems: "flex-start", gap: 10 },
+  hsBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, alignSelf: "flex-start" },
+  hsBadgeText: { color: "#fff", fontSize: 12, fontWeight: "700" },
+  resultName: { fontSize: 14, fontWeight: "700", marginBottom: 2 },
+  resultNameEn: { fontSize: 11, marginBottom: 6 },
+  resultMeta: { flexDirection: "row", alignItems: "center", gap: 8 },
+  chapterTag: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 5 },
+  chapterText: { fontSize: 11, fontWeight: "600" },
+  kwText: { fontSize: 11 },
+  miniRates: { alignItems: "flex-end", gap: 4 },
+  miniRate: { flexDirection: "row", alignItems: "center", gap: 3 },
+  miniFlag: { fontSize: 13 },
+  miniRateVal: { fontSize: 12, fontWeight: "700" },
+  selectArrow: { fontSize: 16, fontWeight: "700", marginTop: 4 },
+
+  selectedItemCard: { borderRadius: 12, borderWidth: 1.5, padding: 14, marginBottom: 12 },
+  selectedName: { fontSize: 16, fontWeight: "800", marginBottom: 3 },
+  selectedNameEn: { fontSize: 12 },
+
+  cifRow: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    borderRadius: 10, borderWidth: 1, padding: 12, marginBottom: 14,
+  },
+  cifLabel: { fontSize: 13, fontWeight: "600" },
+  cifInput: { flexDirection: "row", alignItems: "center", borderWidth: 1, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4 },
+  cifPrefix: { fontSize: 14, marginRight: 2 },
+  cifField: { fontSize: 16, fontWeight: "700", minWidth: 70, textAlign: "right" },
+  cifSuffix: { fontSize: 12, marginLeft: 4 },
+
+  countryTabs: { marginBottom: 14 },
+  countryTab: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    borderWidth: 1.5, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8,
+    marginRight: 8,
+  },
+  countryTabFlag: { fontSize: 20 },
+  countryTabName: { fontSize: 13 },
+
+  detailCard: { borderRadius: 14, borderWidth: 1, marginBottom: 14, overflow: "hidden" },
+  detailHeader: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    padding: 14, borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  detailCountryName: { fontSize: 16, fontWeight: "800" },
+  detailSystem: { fontSize: 11, marginTop: 2 },
+  ftaBox: {
+    backgroundColor: "#10b981" + "20", borderRadius: 8,
+    paddingHorizontal: 8, paddingVertical: 4, maxWidth: 200,
+  },
+  ftaText: { color: "#10b981", fontSize: 11, fontWeight: "600" },
+
+  taxTable: {},
+  taxTableHeader: { flexDirection: "row", padding: 10, borderBottomWidth: StyleSheet.hairlineWidth },
+  taxHeader: { fontSize: 11, fontWeight: "700" },
+  taxRow: { flexDirection: "row", alignItems: "flex-start", paddingHorizontal: 10, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth },
+  taxCol1: { flex: 2.2 },
+  taxCol2: { flex: 2, paddingHorizontal: 4 },
+  taxCol3: { flex: 1.2, textAlign: "right" },
+  taxCol4: { flex: 1.2, textAlign: "right" },
+  taxLabel: { fontSize: 12 },
+  taxNote: { fontSize: 10, marginTop: 2, lineHeight: 14 },
+  taxBasis: { fontSize: 10 },
+  taxRate: { fontSize: 12 },
+  taxAmount: { fontSize: 13 },
+
+  calcNoteBox: { margin: 10, borderRadius: 8, borderWidth: 1, padding: 10 },
+  calcNoteText: { fontSize: 11, lineHeight: 17 },
+
+  summaryCard: { borderRadius: 14, borderWidth: 1, padding: 14, marginBottom: 12 },
+  summaryTitle: { fontSize: 14, fontWeight: "700", marginBottom: 10 },
+  summaryGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  summaryItem: {
+    borderWidth: 1, borderRadius: 10, padding: 10,
+    alignItems: "center", minWidth: "30%", flex: 1,
+  },
+  summaryFlag: { fontSize: 22, marginBottom: 4 },
+  summaryCountry: { fontSize: 12, fontWeight: "600", marginBottom: 4 },
+  summaryRate: { fontSize: 20, fontWeight: "800" },
+  summaryRateLabel: { fontSize: 10, marginBottom: 2 },
+  summaryEffective: { fontSize: 10 },
+  ftaBadge: {
+    backgroundColor: "#10b981", color: "#fff",
+    fontSize: 9, fontWeight: "700",
+    paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4, marginTop: 2,
+  },
+
+  disclaimer: { borderRadius: 10, borderWidth: 1, padding: 12, marginBottom: 8 },
+  disclaimerText: { fontSize: 11, lineHeight: 17 },
 });
