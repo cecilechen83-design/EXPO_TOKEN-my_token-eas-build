@@ -1,643 +1,549 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { Text, View, TouchableOpacity, ScrollView, TextInput, StyleSheet, Alert, Platform, useWindowDimensions, ActivityIndicator, Modal } from "react-native";
-import { useRouter } from "expo-router";
+import { useState, useCallback, useEffect } from "react";
+import {
+  Text, View, TouchableOpacity, ScrollView, TextInput,
+  StyleSheet, Alert, Platform, ActivityIndicator, useWindowDimensions, Modal,
+} from "react-native";
 import { ScreenContainer } from "@/components/screen-container";
 import { useColors } from "@/hooks/use-colors";
 import { WebLayout } from "@/components/web-sidebar";
 import { AuthGuard } from "@/components/auth-guard";
 import { useAuth } from "@/lib/auth-context";
-import { useQuoteRequestsApi, type QuoteRequest, type QuoteRequestItem, type AiQuoteResponse, type AiPriceRule } from "@/hooks/use-quote-requests-api";
-import * as XLSX from "xlsx";
+import { IconSymbol } from "@/components/ui/icon-symbol";
 
-// Web 端 Alert.alert 是 no-op，统一用此函数替代
+const CHANNELS = ["海运整柜", "海运拼柜", "空运", "快递", "小包", "铁路", "卡车"];
+
 function showAlert(title: string, message?: string) {
-  if (Platform.OS === "web") {
-    window.alert(message ? `${title}\n${message}` : title);
-  } else {
-    Alert.alert(title, message ?? "");
-  }
+  if (Platform.OS === "web") window.alert(message ? `${title}\n${message}` : title);
+  else Alert.alert(title, message ?? "");
 }
 
-// ===== 价格表上传解析（原样保存每个 Sheet 的表格数据） =====
-interface SheetData {
-  name: string;
-  headers: string[];
-  rows: string[][];
+async function apiPost(path: string, body: any) {
+  const r = await fetch(path, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return r.json();
+}
+async function apiGet(path: string) {
+  const r = await fetch(path, { credentials: "include" });
+  return r.json();
 }
 
-function parsePriceExcelRaw(buffer: ArrayBuffer): { sheets: SheetData[]; sheetNames: string[]; totalRows: number } {
-  const wb = XLSX.read(buffer, { type: "array" });
-  const sheets: SheetData[] = [];
-  let totalRows = 0;
-  for (const sheetName of wb.SheetNames) {
-    const ws = wb.Sheets[sheetName];
-    // 用 header:1 获取原始二维数组（保留合并单元格的空值）
-    const rawRows: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-    if (rawRows.length === 0) continue;
-    // 找到第一个非空行作为表头
-    let headerIdx = 0;
-    for (let i = 0; i < Math.min(rawRows.length, 5); i++) {
-      const nonEmpty = rawRows[i].filter((c: any) => String(c).trim() !== "").length;
-      if (nonEmpty >= 2) { headerIdx = i; break; }
-    }
-    const headers = rawRows[headerIdx].map((c: any) => String(c).trim());
-    const dataRows = rawRows.slice(headerIdx + 1)
-      .filter((row: any[]) => row.some((c: any) => String(c).trim() !== ""))
-      .map((row: any[]) => row.map((c: any) => String(c).trim()));
-    totalRows += dataRows.length;
-    sheets.push({ name: sheetName, headers, rows: dataRows });
-  }
-  return { sheets, sheetNames: wb.SheetNames, totalRows };
-}
+type CalcResult = {
+  success: boolean;
+  tableInfo?: { id: number; fileName: string; country: string; channel: string; currency: string };
+  chargeableWeight?: number;
+  unitPrice?: number;
+  freightBase?: number;
+  freightFormula?: string;
+  surcharges?: { name: string; amount: number; formula?: string }[];
+  totalPrice?: number;
+  currency?: string;
+  matchedRule?: any;
+  message?: string;
+};
 
-// 智能辅助定位：根据目的国和品类关键词，在 Sheet 数据中查找匹配的行
-function findRelevantRows(sheets: SheetData[], country: string, category?: string): { sheetName: string; matchedRows: { rowIdx: number; cells: string[] }[]; headers: string[] }[] {
-  const results: { sheetName: string; matchedRows: { rowIdx: number; cells: string[] }[]; headers: string[] }[] = [];
-  const countryLower = (country || "").toLowerCase();
-  const categoryLower = (category || "").toLowerCase();
-
-  // 国家关键词映射
-  const countryKeywords: Record<string, string[]> = {
-    "巴西": ["巴西", "brazil", "br"],
-    "墨西哥": ["墨西哥", "mexico", "mx", "美墨"],
-    "智利": ["智利", "chile", "cl"],
-    "哥伦比亚": ["哥伦比亚", "colombia", "co"],
-    "秘鲁": ["秘鲁", "peru", "pe"],
-    "美国": ["美国", "usa", "us", "美墨"],
-  };
-
-  for (const sheet of sheets) {
-    // 先检查 Sheet 名称是否匹配目的国
-    const sheetNameLower = sheet.name.toLowerCase();
-    let sheetMatchesCountry = false;
-    if (countryLower) {
-      for (const [, keywords] of Object.entries(countryKeywords)) {
-        if (keywords.some(kw => countryLower.includes(kw) || kw.includes(countryLower))) {
-          if (keywords.some(kw => sheetNameLower.includes(kw))) {
-            sheetMatchesCountry = true;
-            break;
-          }
-        }
-      }
-      // 直接包含匹配
-      if (!sheetMatchesCountry && (sheetNameLower.includes(countryLower) || countryLower.includes(sheetNameLower.slice(0, 2)))) {
-        sheetMatchesCountry = true;
-      }
-    }
-    if (!sheetMatchesCountry && countryLower) continue;
-
-    // 在匹配的 Sheet 中查找品类相关行
-    const matchedRows: { rowIdx: number; cells: string[] }[] = [];
-    if (categoryLower) {
-      for (let i = 0; i < sheet.rows.length; i++) {
-        const rowText = sheet.rows[i].join(" ").toLowerCase();
-        if (rowText.includes(categoryLower) || categoryLower.split("").some(ch => rowText.includes(ch))) {
-          matchedRows.push({ rowIdx: i, cells: sheet.rows[i] });
-        }
-      }
-    }
-    // 如果没有品类匹配，返回所有数据行（限制前10行）
-    if (matchedRows.length === 0) {
-      for (let i = 0; i < Math.min(sheet.rows.length, 10); i++) {
-        matchedRows.push({ rowIdx: i, cells: sheet.rows[i] });
-      }
-    }
-    results.push({ sheetName: sheet.name, matchedRows, headers: sheet.headers });
-  }
-  return results;
-}
+type QuoteRequest = {
+  id: number;
+  quoteNo: string;
+  status: string;
+  createdAt: string;
+  customerName: string;
+  customerEmail: string;
+  customerCompany: string;
+  totalWeight: number;
+  totalVolume: number;
+  itemCount: number;
+  items: any[];
+  adminNote?: string;
+  confirmedBy?: string;
+  confirmedAt?: string;
+  quoteFileUrl?: string;
+};
 
 export default function QuoteManageScreen() {
   const colors = useColors();
   const { width } = useWindowDimensions();
   const isWide = width >= 768;
   const { user } = useAuth();
-  const api = useQuoteRequestsApi();
-  const router = useRouter();
 
-  const [activeTab, setActiveTab] = useState<"quotes" | "prices">("quotes");
-  const [quotes, setQuotes] = useState<QuoteRequest[]>([]);
-  const [stats, setStats] = useState({ pending: 0, confirmed: 0, total: 0, priceTableVersion: "未上传" });
-  const [priceTable, setPriceTable] = useState<any>(null);
+  const [activeTab, setActiveTab] = useState<"calc" | "inquiries">("calc");
+
+  // ── Pricing Calculator State ──────────────────────────────
+  const [calcCountry, setCalcCountry] = useState("");
+  const [calcChannel, setCalcChannel] = useState("");
+  const [calcWeight, setCalcWeight] = useState("");
+  const [calcVolume, setCalcVolume] = useState("");
+  const [calcQty, setCalcQty] = useState("1");
+  const [calcName, setCalcName] = useState("");
+  const [calcCategory, setCalcCategory] = useState("");
+  const [calcResult, setCalcResult] = useState<CalcResult | null>(null);
+  const [calcLoading, setCalcLoading] = useState(false);
+
+  // Manual adjustment & surcharges
+  const [manualSurcharges, setManualSurcharges] = useState<{ name: string; amount: string }[]>([]);
+  const [adjustAmount, setAdjustAmount] = useState("");
+  const [adjustNote, setAdjustNote] = useState("");
+  const [clientName, setClientName] = useState("");
+  const [quoteNote, setQuoteNote] = useState("");
+
+  // Available countries/channels from price tables
+  const [availCountries, setAvailCountries] = useState<string[]>([]);
+  const [availChannels, setAvailChannels] = useState<string[]>(CHANNELS);
+
+  // ── Inquiry List State ────────────────────────────────────
+  const [inquiries, setInquiries] = useState<QuoteRequest[]>([]);
+  const [inquiriesLoading, setInquiriesLoading] = useState(false);
+  const [statusFilter, setStatusFilter] = useState("pending");
   const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-  const [statusFilter, setStatusFilter] = useState("all");
-
-  // 价格表上传状态
-  const [uploadPreview, setUploadPreview] = useState<{ sheets: SheetData[]; sheetNames: string[]; totalRows: number; fileName: string } | null>(null);
-  // 当前查看的 Sheet 索引
-  const [activeSheetIdx, setActiveSheetIdx] = useState(0);
-  // 已加载的价格表 Sheet 数据（从数据库加载）
-  const [loadedSheets, setLoadedSheets] = useState<SheetData[]>([]);
-  const [loadedSheetIdx, setLoadedSheetIdx] = useState(0);
-
-  // 报价确认弹窗
+  const [inlineCalcId, setInlineCalcId] = useState<number | null>(null);
+  const [inlineResult, setInlineResult] = useState<CalcResult | null>(null);
   const [confirmModal, setConfirmModal] = useState<{ visible: boolean; quote: QuoteRequest | null }>({ visible: false, quote: null });
   const [confirmNote, setConfirmNote] = useState("");
   const [confirmExpiry, setConfirmExpiry] = useState("");
-  const [confirmContact, setConfirmContact] = useState("");
 
-  // 上传报价单状态
-  const [uploadingFileId, setUploadingFileId] = useState<number | null>(null);
-
-  // AI 报价状态
-  const [aiParseStatus, setAiParseStatus] = useState<string>("idle");
-  const [aiRuleCount, setAiRuleCount] = useState(0);
-  const [aiParseError, setAiParseError] = useState<string | null>(null);
-  const [aiParsing, setAiParsing] = useState(false);
-  const [aiQuoteResult, setAiQuoteResult] = useState<AiQuoteResponse | null>(null);
-  const [aiQuoting, setAiQuoting] = useState<number | null>(null);
-
-  // AI 规则查看/编辑状态
-  const [aiRulesVisible, setAiRulesVisible] = useState(false);
-  const [aiRules, setAiRules] = useState<AiPriceRule[]>([]);
-  const [aiRulesLoading, setAiRulesLoading] = useState(false);
-  const [editingRuleIdx, setEditingRuleIdx] = useState<number | null>(null);
-  const [editingRule, setEditingRule] = useState<AiPriceRule | null>(null);
-  const [addingRule, setAddingRule] = useState(false);
-
-  // 加载数据
-  const loadData = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const [statsRes, listRes, ptRes] = await Promise.all([
-        api.getQuoteStats(),
-        api.getQuoteList({ status: statusFilter === "all" ? undefined : statusFilter }),
-        api.getCurrentPriceTable(),
-      ]);
-      if (statsRes.success) setStats(statsRes.stats);
-      if (listRes.success) setQuotes(listRes.quotes);
-      if (ptRes.success) {
-        setPriceTable(ptRes.priceTable);
-        if (ptRes.priceTable) {
-          setAiParseStatus(ptRes.priceTable.aiParseStatus || "idle");
-          setAiRuleCount(ptRes.priceTable.aiRuleCount || 0);
-          setAiParseError(ptRes.priceTable.aiParseError || null);
-        }
-      }
-    } catch (e) {
-      console.error("加载数据失败", e);
-    }
-    setRefreshing(false);
-  }, [statusFilter]); // api omitted: including it causes infinite re-render when api reference is unstable
-
-  useEffect(() => { loadData(); }, [loadData]);
-
-  // 文件上传处理（Web 端）
-  const handleFileUpload = useCallback(() => {
-    if (Platform.OS !== "web") {
-      showAlert("提示", "请在网页版上传价格表");
-      return;
-    }
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".xlsx,.xls,.csv";
-    input.onchange = async (e: any) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      const buffer = await file.arrayBuffer();
-      const { sheets, sheetNames, totalRows } = parsePriceExcelRaw(buffer);
-      if (sheets.length === 0 || totalRows === 0) {
-        showAlert("错误", "未能解析到有效数据，请检查 Excel 文件");
-        return;
-      }
-      setUploadPreview({ sheets, sheetNames, totalRows, fileName: file.name });
-      setActiveSheetIdx(0);
-    };
-    input.click();
+  // Load available countries from price tables
+  useEffect(() => {
+    apiGet("/api/price-table/countries").then(res => {
+      if (res.success && res.countries?.length) setAvailCountries(res.countries);
+    }).catch(() => {});
   }, []);
 
-  // 确认上传价格表（原样保存 Sheet 数据）
-  const handleConfirmUpload = useCallback(async () => {
-    if (!uploadPreview) return;
-    const res = await api.uploadPriceTable({
-      rules: uploadPreview.sheets,
-      fileName: uploadPreview.fileName,
-      sheetNames: uploadPreview.sheetNames,
-      uploadedBy: (user as any)?.id,
-      uploadedByName: user?.name || "",
-    });
-    if (res.success) {
-      showAlert("成功", res.message || "价格表已生效");
-      setUploadPreview(null);
-      loadData();
-    } else {
-      showAlert("失败", res.message || "上传失败");
-    }
-  }, [api, uploadPreview, user, loadData]);
+  // Load inquiries
+  const loadInquiries = useCallback(async () => {
+    setInquiriesLoading(true);
+    try {
+      const res = await apiGet(`/api/quote-requests?status=${statusFilter}`);
+      if (res.success) setInquiries(res.quotes || []);
+    } catch (e) { console.error(e); }
+    setInquiriesLoading(false);
+  }, [statusFilter]);
 
-  // 确认报价
-  const handleConfirmQuote = useCallback(async () => {
+  useEffect(() => { if (activeTab === "inquiries") loadInquiries(); }, [activeTab, loadInquiries]);
+
+  // ── Calculate price ───────────────────────────────────────
+  const handleCalculate = async () => {
+    if (!calcCountry.trim()) { showAlert("提示", "请填写目的国"); return; }
+    if (!calcChannel) { showAlert("提示", "请选择渠道"); return; }
+    const weight = parseFloat(calcWeight);
+    const volume = parseFloat(calcVolume) || 0;
+    if (!weight || weight <= 0) { showAlert("提示", "请输入有效重量"); return; }
+
+    setCalcLoading(true);
+    setCalcResult(null);
+    try {
+      const res = await apiPost("/api/price-table/calculate", {
+        country: calcCountry.trim(),
+        channel: calcChannel,
+        weight,
+        volume,
+        qty: parseInt(calcQty) || 1,
+        category: calcCategory,
+      });
+      setCalcResult(res);
+      if (!res.success) showAlert("计算失败", res.message || "未找到匹配报价表");
+    } catch (err: any) {
+      showAlert("错误", err.message);
+    }
+    setCalcLoading(false);
+  };
+
+  // ── Inline calculate for inquiry ─────────────────────────
+  const handleInlineCalc = async (inquiry: QuoteRequest, channel: string) => {
+    if (!channel) { showAlert("提示", "请选择渠道"); return; }
+    setInlineCalcId(inquiry.id);
+    setInlineResult(null);
+    const weight = inquiry.totalWeight || inquiry.items?.reduce((s: number, i: any) => s + (parseFloat(i.weight) || 0), 0) || 0;
+    const volume = inquiry.totalVolume || inquiry.items?.reduce((s: number, i: any) => s + (parseFloat(i.volume) || 0), 0) || 0;
+    const country = inquiry.items?.[0]?.country || "";
+    try {
+      const res = await apiPost("/api/price-table/calculate", {
+        country, channel, weight, volume,
+        qty: inquiry.itemCount || 1,
+      });
+      setInlineResult(res);
+      if (!res.success) showAlert("计算失败", res.message || "未找到匹配报价表");
+    } catch (err: any) {
+      showAlert("错误", err.message);
+    }
+    setInlineCalcId(null);
+  };
+
+  // ── Confirm inquiry ───────────────────────────────────────
+  const handleConfirm = async () => {
     if (!confirmModal.quote) return;
-    const res = await api.confirmQuote(confirmModal.quote.id, {
-      adminNote: confirmNote,
-      validUntil: confirmExpiry,
-      contactName: confirmContact,
-      confirmedBy: (user as any)?.id,
-      confirmedByName: user?.name || "",
-    });
-    if (res.success) {
-      showAlert("成功", "报价已确认发出");
-      setConfirmModal({ visible: false, quote: null });
-      setConfirmNote("");
-      setConfirmExpiry("");
-      setConfirmContact("");
-      loadData();
-    } else {
-      showAlert("失败", res.message || "操作失败");
-    }
-  }, [api, confirmModal, confirmNote, confirmExpiry, confirmContact, user, loadData]);
-
-  // 拒绝报价
-  const handleRejectQuote = useCallback(async (quote: QuoteRequest) => {
-    if (Platform.OS === "web") {
-      const reason = prompt("请输入拒绝原因（可选）：");
-      const res = await api.rejectQuote(quote.id, {
-        reason: reason || undefined,
-        confirmedBy: (user as any)?.id,
-        confirmedByName: user?.name || "",
+    try {
+      const res = await apiPost(`/api/quote-requests/${confirmModal.quote.id}/confirm`, {
+        adminNote: confirmNote,
+        validUntil: confirmExpiry,
+        confirmedByName: (user as any)?.name || "",
       });
       if (res.success) {
-        showAlert("已拒绝", "报价已拒绝");
-        loadData();
-      }
-    } else {
-      Alert.alert("确认", "确定拒绝此报价？", [
-        { text: "取消" },
-        { text: "确定", onPress: async () => {
-          const res = await api.rejectQuote(quote.id, {
-            confirmedBy: (user as any)?.id,
-            confirmedByName: user?.name || "",
-          });
-          if (res.success) loadData();
-        }},
-      ]);
-    }
-  }, [api, user, loadData]);
+        showAlert("成功", "已确认并发送报价邮件");
+        setConfirmModal({ visible: false, quote: null });
+        setConfirmNote(""); setConfirmExpiry("");
+        loadInquiries();
+      } else showAlert("失败", res.message);
+    } catch (e) { showAlert("错误", "操作失败"); }
+  };
 
-  // 上传报价单文件
-  const handleUploadQuoteFile = useCallback(async (quoteId: number) => {
-    if (Platform.OS !== "web") {
-      showAlert("提示", "请在网页版上传报价单");
-      return;
-    }
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".xlsx,.xls,.csv,.pdf,.doc,.docx";
-    input.onchange = async (e: any) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      setUploadingFileId(quoteId);
-      try {
-        const reader = new FileReader();
-        reader.onload = async (ev) => {
-          const base64 = (ev.target?.result as string).split(",")[1];
-          const res = await api.uploadQuoteFile(quoteId, {
-            fileName: file.name,
-            fileData: base64,
-            contentType: file.type,
-          });
-          if (res.success) {
-            showAlert("成功", "报价单已上传");
-            loadData();
-          } else {
-            showAlert("失败", res.message || "上传失败");
-          }
-          setUploadingFileId(null);
-        };
-        reader.readAsDataURL(file);
-      } catch (err) {
-        showAlert("失败", "上传失败");
-        setUploadingFileId(null);
-      }
-    };
-    input.click();
-  }, [api, loadData]);
-
-  // 下载报价单文件
-  const handleDownloadQuoteFile = useCallback(async (quoteId: number) => {
+  const handleReject = async (q: QuoteRequest) => {
+    const reason = Platform.OS === "web" ? prompt("拒绝原因（可选）：") : "";
     try {
-      const res = await api.getQuoteFile(quoteId);
-      if (res.success && res.url) {
-        if (Platform.OS === "web") {
-          window.open(res.url, "_blank");
-        }
-      } else {
-        showAlert("提示", res.message || "未找到报价单文件");
-      }
-    } catch (err) {
-      showAlert("失败", "获取报价单失败");
+      const res = await apiPost(`/api/quote-requests/${q.id}/reject`, {
+        reason, confirmedByName: (user as any)?.name || "",
+      });
+      if (res.success) { showAlert("已拒绝", "报价已拒绝"); loadInquiries(); }
+      else showAlert("失败", res.message);
+    } catch (e) { showAlert("错误", "操作失败"); }
+  };
+
+  // ── PDF Export ────────────────────────────────────────────
+  const handleExportPDF = () => {
+    if (Platform.OS !== "web") { showAlert("提示", "请在网页版导出PDF"); return; }
+    if (!calcResult?.success) { showAlert("提示", "请先完成报价计算"); return; }
+
+    const autoSurcharges = calcResult.surcharges || [];
+    const manualAmt = manualSurcharges.reduce((s, x) => s + (parseFloat(x.amount) || 0), 0);
+    const adjust = parseFloat(adjustAmount) || 0;
+    const baseFreight = calcResult.freightBase || 0;
+    const autoSurTotal = autoSurcharges.reduce((s: number, x: any) => s + (x.amount || 0), 0);
+    const total = baseFreight + autoSurTotal + manualAmt + adjust;
+    const currency = calcResult.currency || "RMB";
+
+    const html = `<!DOCTYPE html>
+<html lang="zh">
+<head><meta charset="UTF-8"><title>报价单</title>
+<style>
+  body{font-family:Arial,sans-serif;padding:40px;color:#111;max-width:800px;margin:0 auto}
+  h1{color:#1e40af;border-bottom:2px solid #1e40af;padding-bottom:8px}
+  .meta{display:flex;gap:40px;margin:20px 0;color:#555}
+  table{width:100%;border-collapse:collapse;margin:20px 0}
+  th{background:#1e40af;color:white;padding:10px;text-align:left}
+  td{padding:9px 10px;border-bottom:1px solid #e5e7eb}
+  tr:nth-child(even)td{background:#f9fafb}
+  .total{font-size:18px;font-weight:700;color:#1e40af;text-align:right;margin-top:10px}
+  .formula{background:#f0f9ff;border-left:3px solid #3b82f6;padding:10px;margin:10px 0;font-size:13px;color:#1e40af}
+  .note{color:#6b7280;font-size:13px;margin-top:20px}
+  @media print{body{padding:20px}}
+</style></head>
+<body>
+<h1>运输报价单</h1>
+<div class="meta">
+  <span>客户：<strong>${clientName || "(内部报价)"}</strong></span>
+  <span>日期：<strong>${new Date().toLocaleDateString("zh-CN")}</strong></span>
+  <span>目的国：<strong>${calcResult.tableInfo?.country || calcCountry}</strong></span>
+  <span>渠道：<strong>${calcResult.tableInfo?.channel || calcChannel}</strong></span>
+</div>
+${calcResult.tableInfo ? `<div style="color:#6b7280;font-size:13px;margin-bottom:12px">参考报价表：${calcResult.tableInfo.fileName}</div>` : ""}
+<div class="formula">${calcResult.freightFormula || ""}</div>
+<table>
+  <tr><th>费用项目</th><th>计算公式</th><th>金额（${currency}）</th></tr>
+  <tr><td>基础运费</td><td>${calcResult.freightFormula || ""}</td><td>${baseFreight.toFixed(2)}</td></tr>
+  ${autoSurcharges.map((s: any) => `<tr><td>${s.name}</td><td>${s.formula || ""}</td><td>${(s.amount || 0).toFixed(2)}</td></tr>`).join("")}
+  ${manualSurcharges.filter(s => s.name && parseFloat(s.amount)).map(s => `<tr><td>${s.name}</td><td>手动添加</td><td>${parseFloat(s.amount).toFixed(2)}</td></tr>`).join("")}
+  ${adjust ? `<tr><td>价格调整</td><td>${adjustNote || ""}</td><td>${adjust.toFixed(2)}</td></tr>` : ""}
+</table>
+<div class="total">合计：${currency} ${total.toFixed(2)}</div>
+${quoteNote ? `<div class="note"><strong>备注：</strong>${quoteNote}</div>` : ""}
+<div class="note" style="margin-top:30px">本报价单仅供参考，最终价格以正式合同为准。有效期：${confirmExpiry || "7天"}</div>
+</body></html>`;
+
+    const win = window.open("", "_blank");
+    if (win) {
+      win.document.write(html);
+      win.document.close();
+      win.print();
     }
-  }, [api]);
+  };
 
-  // AI 解析价格表
-  const handleAiParse = useCallback(async () => {
-    setAiParsing(true);
-    try {
-      const res = await api.aiParsePriceTable(priceTable?.id);
-      if (res.success) {
-        setAiParseStatus("parsing");
-        showAlert("已启动", res.message || "AI 解析已启动，请稍后刷新查看结果");
-        setTimeout(() => loadData(), 10000);
-      } else {
-        showAlert("失败", res.message || "AI 解析启动失败");
-      }
-    } catch (err: any) {
-      showAlert("错误", err.message || "AI 解析失败");
-    }
-    setAiParsing(false);
-  }, [api, priceTable, loadData]);
-
-  // AI 自动报价
-  const handleAiQuote = useCallback(async (quoteId: number) => {
-    setAiQuoting(quoteId);
-    setAiQuoteResult(null);
-    try {
-      const res = await api.aiAutoQuote(quoteId);
-      if (res.success) {
-        setAiQuoteResult(res);
-      } else {
-        showAlert("失败", (res as any).message || "AI 报价失败");
-      }
-    } catch (err: any) {
-      showAlert("错误", err.message || "AI 报价失败");
-    }
-    setAiQuoting(null);
-  }, [api]);
-
-  // 加载 AI 解析规则明细
-  const handleLoadAiRules = useCallback(async () => {
-    setAiRulesLoading(true);
-    try {
-      const res = await api.getAiParseStatus();
-      if (res.success && res.parsedRules) {
-        setAiRules(res.parsedRules);
-        setAiRulesVisible(true);
-      } else {
-        showAlert("提示", "未找到 AI 解析规则，请先执行 AI 解析");
-      }
-    } catch (err: any) {
-      showAlert("错误", err.message || "加载规则失败");
-    }
-    setAiRulesLoading(false);
-  }, [api]);
-
-  // 删除单条规则
-  const handleDeleteRule = useCallback((idx: number) => {
-    if (Platform.OS === "web") {
-      if (window.confirm(`确定删除第 ${idx + 1} 条规则？`)) {
-        setAiRules(prev => prev.filter((_, i) => i !== idx));
-      }
-    } else {
-      Alert.alert("确认删除", `确定删除第 ${idx + 1} 条规则？`, [
-        { text: "取消", style: "cancel" },
-        { text: "删除", style: "destructive", onPress: () => {
-          setAiRules(prev => prev.filter((_, i) => i !== idx));
-        }},
-      ]);
-    }
-  }, []);
-
-  // 编辑单条规则
-  const handleEditRule = useCallback((idx: number) => {
-    setEditingRuleIdx(idx);
-    setEditingRule({ ...aiRules[idx] });
-  }, [aiRules]);
-
-  // 保存编辑
-  const handleSaveEditRule = useCallback(() => {
-    if (editingRuleIdx === null || !editingRule) return;
-    setAiRules(prev => prev.map((r, i) => i === editingRuleIdx ? editingRule : r));
-    setEditingRuleIdx(null);
-    setEditingRule(null);
-  }, [editingRuleIdx, editingRule]);
-
-  // 新增规则
-  const handleAddRule = useCallback(() => {
-    setAddingRule(true);
-    setEditingRule({
-      route: "", transportMethod: "", destinationCountry: "",
-      category: "普货", pricingUnit: "RMB/CBM", volumeOrWeightRange: "",
-      unitPrice: 0, currency: "RMB", transitTime: "",
-    });
-  }, []);
-
-  // 保存新增规则
-  const handleSaveNewRule = useCallback(() => {
-    if (!editingRule || !editingRule.unitPrice) {
-      showAlert("提示", "单价不能为空");
-      return;
-    }
-    setAiRules(prev => [...prev, editingRule]);
-    setAddingRule(false);
-    setEditingRule(null);
-  }, [editingRule]);
-
-  // 保存所有规则到服务器
-  const handleSaveAllRules = useCallback(async () => {
-    try {
-      const res = await api.updateAiRules(aiRules, priceTable?.id);
-      if (res.success) {
-        showAlert("成功", res.message || "规则已保存");
-        setAiRuleCount(res.ruleCount || aiRules.length);
-      } else {
-        showAlert("失败", res.message || "保存失败");
-      }
-    } catch (err: any) {
-      showAlert("错误", err.message || "保存失败");
-    }
-  }, [api, aiRules, priceTable]);
-
-  // 统计卡片
-  const renderStats = () => (
-    <View style={[styles.statsRow, isWide && styles.statsRowWide]}>
-      <View style={[styles.statCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-        <Text style={[styles.statLabel, { color: colors.muted }]}>待审核</Text>
-        <Text style={[styles.statValue, { color: "#F59E0B" }]}>{stats.pending}</Text>
-      </View>
-      <View style={[styles.statCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-        <Text style={[styles.statLabel, { color: colors.muted }]}>已确认</Text>
-        <Text style={[styles.statValue, { color: "#10B981" }]}>{stats.confirmed}</Text>
-      </View>
-      <View style={[styles.statCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-        <Text style={[styles.statLabel, { color: colors.muted }]}>总询价</Text>
-        <Text style={[styles.statValue, { color: colors.foreground }]}>{stats.total}</Text>
-      </View>
-      <View style={[styles.statCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-        <Text style={[styles.statLabel, { color: colors.muted }]}>价格表</Text>
-        <Text style={[styles.statVersionText, { color: colors.primary }]}>{stats.priceTableVersion}</Text>
-      </View>
-    </View>
-  );
-
-  // 报价卡片
-  const renderQuoteCard = (quote: QuoteRequest) => {
-    const isExpanded = expandedId === quote.id;
-    const total = quote.totalAmount ? `USD ${quote.totalAmount}` : "—";
-    const statusColor = quote.status === "pending" ? "#F59E0B" : quote.status === "confirmed" ? "#10B981" : "#EF4444";
-    const statusLabel = quote.status === "pending" ? "待审核" : quote.status === "confirmed" ? "已确认" : "已拒绝";
+  // ── Renders ───────────────────────────────────────────────
+  const renderCalcTab = () => {
+    const autoSurcharges = calcResult?.surcharges || [];
+    const manualAmt = manualSurcharges.reduce((s, x) => s + (parseFloat(x.amount) || 0), 0);
+    const adjust = parseFloat(adjustAmount) || 0;
+    const baseFreight = calcResult?.freightBase || 0;
+    const autoSurTotal = autoSurcharges.reduce((s: number, x: any) => s + (x.amount || 0), 0);
+    const finalTotal = baseFreight + autoSurTotal + manualAmt + adjust;
+    const currency = calcResult?.currency || "RMB";
 
     return (
-      <View key={quote.id} style={[styles.quoteCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-        <TouchableOpacity style={styles.quoteCardHeader} onPress={() => setExpandedId(isExpanded ? null : quote.id)}>
-          <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
-          <View style={styles.quoteInfo}>
-            <Text style={[styles.quoteCustomer, { color: colors.foreground }]}>
-              {quote.customer?.name || "—"} · {quote.customer?.company || "—"}
-            </Text>
-            <Text style={[styles.quoteMeta, { color: colors.muted }]}>
-              {quote.customer?.email} · {quote.items?.length || 0}件货物 · {quote.quoteNo}
-            </Text>
-          </View>
-          <View style={styles.quoteRight}>
-            <Text style={[styles.quoteTotal, { color: colors.primary }]}>{total}</Text>
-            <View style={[styles.statusTag, { backgroundColor: statusColor + "20" }]}>
-              <Text style={[styles.statusTagText, { color: statusColor }]}>{statusLabel}</Text>
+      <View>
+        {/* Step 1: Conditions */}
+        <View style={[styles.section, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <Text style={[styles.sectionTitle, { color: colors.foreground }]}>第一步：选择报价条件</Text>
+          <View style={[styles.row, isWide && { flexDirection: "row" }]}>
+            <View style={[styles.formGroup, isWide && { flex: 1 }]}>
+              <Text style={[styles.label, { color: colors.muted }]}>目的国 *</Text>
+              <TextInput
+                style={[styles.input, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                value={calcCountry}
+                onChangeText={setCalcCountry}
+                placeholder="例：巴西"
+                placeholderTextColor={colors.muted}
+              />
+              {availCountries.length > 0 && (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.suggestRow}>
+                  {availCountries.filter(c => !calcCountry || c.includes(calcCountry)).map(c => (
+                    <TouchableOpacity key={c} style={[styles.suggestChip, { borderColor: colors.border, backgroundColor: colors.background }]} onPress={() => setCalcCountry(c)}>
+                      <Text style={[styles.suggestText, { color: colors.foreground }]}>{c}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
             </View>
-            <Text style={[styles.quoteTime, { color: colors.muted }]}>{new Date(quote.createdAt).toLocaleString("zh-CN")}</Text>
-          </View>
-        </TouchableOpacity>
-
-        {isExpanded && (
-          <View style={[styles.quoteCardBody, { borderTopColor: colors.border }]}>
-            {/* 货物明细表 */}
-            <View style={[styles.itemsTable, { borderColor: colors.border }]}>
-              <View style={[styles.tableHeader, { backgroundColor: colors.background }]}>
-                <Text style={[styles.th, { color: colors.muted, flex: 2 }]}>品名</Text>
-                <Text style={[styles.th, { color: colors.muted }]}>目的国</Text>
-                <Text style={[styles.th, { color: colors.muted }]}>重量</Text>
-                <Text style={[styles.th, { color: colors.muted }]}>体积</Text>
-                <Text style={[styles.th, { color: colors.muted }]}>运输方式</Text>
-                <Text style={[styles.th, { color: colors.muted }]}>报价(USD)</Text>
-              </View>
-              {(quote.items || []).map((item, idx) => (
-                <View key={idx} style={[styles.tableRow, { borderTopColor: colors.border }]}>
-                  <Text style={[styles.td, { color: colors.foreground, flex: 2 }]}>{item.name}</Text>
-                  <Text style={[styles.td, { color: colors.foreground }]}>{item.country}</Text>
-                  <Text style={[styles.td, { color: colors.foreground }]}>{item.weight || 0}kg</Text>
-                  <Text style={[styles.td, { color: colors.foreground }]}>{item.volume || 0}m³</Text>
-                  <Text style={[styles.td, { color: colors.primary }]}>{item.recommended?.method || "—"}</Text>
-                  <Text style={[styles.td, { color: colors.primary, fontWeight: "600" }]}>{item.recommended?.price || "0"}</Text>
-                </View>
-              ))}
-              <View style={[styles.tableRow, { borderTopColor: colors.border }]}>
-                <Text style={[styles.td, { color: colors.muted, flex: 5, textAlign: "right", fontWeight: "500" }]}>合计</Text>
-                <Text style={[styles.td, { color: colors.primary, fontWeight: "700" }]}>{total}</Text>
-              </View>
+            <View style={[styles.formGroup, isWide && { flex: 1 }]}>
+              <Text style={[styles.label, { color: colors.muted }]}>渠道 *</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                {CHANNELS.map(ch => (
+                  <TouchableOpacity
+                    key={ch}
+                    style={[styles.chip, calcChannel === ch && { backgroundColor: colors.primary + "20", borderColor: colors.primary }]}
+                    onPress={() => setCalcChannel(ch)}
+                  >
+                    <Text style={[styles.chipText, { color: calcChannel === ch ? colors.primary : colors.muted }]}>{ch}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
             </View>
+          </View>
 
-            {/* 操作按钮 */}
-            {/* 报价单文件状态 */}
-            {quote.quoteFileUrl && (
-              <View style={[styles.quoteFileBar, { backgroundColor: "#F0FDF4", borderColor: "#BBF7D0" }]}>
-                <Text style={{ fontSize: 13, color: "#16A34A", flex: 1 }}>📄 已上传报价单：{quote.quoteFileName || "报价单"}</Text>
-                <TouchableOpacity onPress={() => handleDownloadQuoteFile(quote.id)}>
-                  <Text style={{ fontSize: 13, color: colors.primary, fontWeight: "500" }}>下载查看</Text>
-                </TouchableOpacity>
+          {/* Step 2: Cargo */}
+          <Text style={[styles.sectionTitle, { color: colors.foreground, marginTop: 16 }]}>第二步：货物信息</Text>
+          <View style={[styles.row, isWide && { flexDirection: "row" }]}>
+            <View style={[styles.formGroup, isWide && { flex: 2 }]}>
+              <Text style={[styles.label, { color: colors.muted }]}>品名</Text>
+              <TextInput
+                style={[styles.input, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                value={calcName}
+                onChangeText={setCalcName}
+                placeholder="货物品名（选填）"
+                placeholderTextColor={colors.muted}
+              />
+            </View>
+            <View style={[styles.formGroup, isWide && { flex: 1 }]}>
+              <Text style={[styles.label, { color: colors.muted }]}>品类</Text>
+              <TextInput
+                style={[styles.input, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                value={calcCategory}
+                onChangeText={setCalcCategory}
+                placeholder="如：普货、电子"
+                placeholderTextColor={colors.muted}
+              />
+            </View>
+          </View>
+          <View style={[styles.row, isWide && { flexDirection: "row" }]}>
+            <View style={[styles.formGroup, isWide && { flex: 1 }]}>
+              <Text style={[styles.label, { color: colors.muted }]}>重量(kg) *</Text>
+              <TextInput
+                style={[styles.input, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                value={calcWeight}
+                onChangeText={setCalcWeight}
+                placeholder="总重量"
+                placeholderTextColor={colors.muted}
+                keyboardType="decimal-pad"
+              />
+            </View>
+            <View style={[styles.formGroup, isWide && { flex: 1 }]}>
+              <Text style={[styles.label, { color: colors.muted }]}>体积(m³)</Text>
+              <TextInput
+                style={[styles.input, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                value={calcVolume}
+                onChangeText={setCalcVolume}
+                placeholder="体积重=体积×167"
+                placeholderTextColor={colors.muted}
+                keyboardType="decimal-pad"
+              />
+            </View>
+            <View style={[styles.formGroup, isWide && { flex: 0.6 }]}>
+              <Text style={[styles.label, { color: colors.muted }]}>件数</Text>
+              <TextInput
+                style={[styles.input, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                value={calcQty}
+                onChangeText={setCalcQty}
+                placeholder="1"
+                placeholderTextColor={colors.muted}
+                keyboardType="number-pad"
+              />
+            </View>
+          </View>
+
+          <TouchableOpacity
+            style={[styles.calcBtn, { backgroundColor: colors.primary, opacity: calcLoading ? 0.6 : 1 }]}
+            onPress={handleCalculate}
+            disabled={calcLoading}
+          >
+            {calcLoading ? <ActivityIndicator color="#fff" /> :
+              <Text style={styles.calcBtnText}>开始计算报价</Text>}
+          </TouchableOpacity>
+        </View>
+
+        {/* Step 3: Result */}
+        {calcResult && (
+          <View style={[styles.section, { backgroundColor: colors.surface, borderColor: calcResult.success ? colors.primary + "40" : "#FCA5A5" }]}>
+            {!calcResult.success ? (
+              <View style={styles.errorBox}>
+                <Text style={styles.errorText}>{calcResult.message || "计算失败，未找到匹配报价表"}</Text>
               </View>
-            )}
-
-            {/* AI 报价结果展示 */}
-            {aiQuoteResult && aiQuoteResult.quoteId === quote.id && (
-              <View style={[styles.aiResultBox, { backgroundColor: "#F0F9FF", borderColor: "#BAE6FD" }]}>
-                <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 8 }}>
-                  <Text style={{ fontSize: 14, fontWeight: "600", color: "#0369A1" }}>🤖 AI 报价建议</Text>
-                  <Text style={{ fontSize: 12, color: "#0EA5E9", marginLeft: 8 }}>建议总价: {aiQuoteResult.currency} {aiQuoteResult.totalRecommendedPrice}</Text>
+            ) : (
+              <>
+                <View style={styles.resultHeader}>
+                  <Text style={[styles.sectionTitle, { color: colors.foreground }]}>第三步：计算结果</Text>
+                  {calcResult.tableInfo && (
+                    <Text style={[styles.tableRef, { color: colors.muted }]}>
+                      参考报价表：{calcResult.tableInfo.fileName} ({calcResult.tableInfo.country} · {calcResult.tableInfo.channel})
+                    </Text>
+                  )}
                 </View>
-                {aiQuoteResult.items.map((item, idx) => (
-                  <View key={idx} style={{ marginBottom: 8, paddingBottom: 8, borderBottomWidth: idx < aiQuoteResult.items.length - 1 ? 1 : 0, borderBottomColor: "#E0F2FE" }}>
-                    <Text style={{ fontSize: 13, fontWeight: "500", color: "#0C4A6E" }}>{item.name} → {item.country}</Text>
-                    {item.aiQuote?.recommendation && (
-                      <View style={{ marginTop: 4, paddingLeft: 12 }}>
-                        <Text style={{ fontSize: 12, color: "#0369A1" }}>
-                          ✅ 推荐: {item.aiQuote.recommendation.transportMethod} | {item.aiQuote.recommendation.currency} {item.aiQuote.recommendation.totalPrice}
-                          {item.aiQuote.recommendation.transitTime ? ` | ${item.aiQuote.recommendation.transitTime}` : ""}
-                        </Text>
-                        <Text style={{ fontSize: 11, color: "#64748B", marginTop: 2 }}>{item.aiQuote.recommendation.reason}</Text>
-                      </View>
-                    )}
-                    {item.aiQuote?.matchedRules && item.aiQuote.matchedRules.length > 0 && (
-                      <View style={{ marginTop: 4, paddingLeft: 12 }}>
-                        <Text style={{ fontSize: 11, color: "#64748B" }}>其他方案:</Text>
-                        {item.aiQuote.matchedRules.slice(0, 3).map((rule, rIdx) => (
-                          <Text key={rIdx} style={{ fontSize: 11, color: "#64748B", marginTop: 1 }}>
-                            · {rule.transportMethod}: {rule.currency} {rule.calculatedPrice} ({rule.calculation})
-                          </Text>
-                        ))}
-                      </View>
-                    )}
-                    {item.aiQuote?.analysis && (
-                      <Text style={{ fontSize: 11, color: "#475569", marginTop: 3, paddingLeft: 12 }}>📝 {item.aiQuote.analysis}</Text>
-                    )}
-                    {item.aiQuote?.warnings && item.aiQuote.warnings.length > 0 && (
-                      <View style={{ marginTop: 3, paddingLeft: 12 }}>
-                        {item.aiQuote.warnings.map((w, wIdx) => (
-                          <Text key={wIdx} style={{ fontSize: 11, color: "#D97706" }}>⚠️ {w}</Text>
-                        ))}
-                      </View>
-                    )}
+
+                <View style={[styles.formulaBox, { backgroundColor: colors.primary + "08", borderColor: colors.primary + "30" }]}>
+                  <Text style={[styles.formulaLabel, { color: colors.primary }]}>计费重量</Text>
+                  <Text style={[styles.formulaText, { color: colors.foreground }]}>
+                    {`重量 ${calcWeight}kg，体积重 ${calcVolume ? (parseFloat(calcVolume) * 167).toFixed(1) : "0"}kg → 计费重 ${calcResult.chargeableWeight?.toFixed(1) || 0}kg`}
+                  </Text>
+                </View>
+
+                <View style={[styles.breakdownTable, { borderColor: colors.border }]}>
+                  <View style={[styles.breakdownHeader, { backgroundColor: colors.background }]}>
+                    <Text style={[styles.bh, { color: colors.muted }]}>费用项目</Text>
+                    <Text style={[styles.bh, { color: colors.muted, flex: 2 }]}>计算公式</Text>
+                    <Text style={[styles.bhRight, { color: colors.muted }]}>金额({currency})</Text>
+                  </View>
+                  <BreakdownRow
+                    label="基础运费"
+                    formula={calcResult.freightFormula || ""}
+                    amount={baseFreight}
+                    highlight
+                    colors={colors}
+                  />
+                  {autoSurcharges.map((s: any, i: number) => (
+                    <BreakdownRow key={i} label={s.name} formula={s.formula || "自动识别"} amount={s.amount || 0} colors={colors} />
+                  ))}
+                  {manualSurcharges.map((s, i) => (
+                    parseFloat(s.amount) > 0 && (
+                      <BreakdownRow key={`m${i}`} label={s.name || `附加费${i + 1}`} formula="手动添加" amount={parseFloat(s.amount)} colors={colors} />
+                    )
+                  ))}
+                  {adjust !== 0 && (
+                    <BreakdownRow label="价格调整" formula={adjustNote || ""} amount={adjust} colors={colors} />
+                  )}
+                  <View style={[styles.totalRow, { borderTopColor: colors.primary, backgroundColor: colors.primary + "08" }]}>
+                    <Text style={[styles.totalLabel, { color: colors.foreground }]}>合计</Text>
+                    <Text style={[styles.totalAmount, { color: colors.primary }]}>{currency} {finalTotal.toFixed(2)}</Text>
+                  </View>
+                </View>
+
+                {/* Step 4: Adjustments */}
+                <Text style={[styles.sectionTitle, { color: colors.foreground, marginTop: 16 }]}>第四步：手动调整</Text>
+
+                <Text style={[styles.label, { color: colors.muted }]}>附加费（超大件/远程/燃油等）</Text>
+                {manualSurcharges.map((s, i) => (
+                  <View key={i} style={[styles.surchargeRow, isWide && { flexDirection: "row" }]}>
+                    <TextInput
+                      style={[styles.surchargeInput, { flex: 2, borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                      value={s.name}
+                      onChangeText={v => setManualSurcharges(prev => prev.map((x, j) => j === i ? { ...x, name: v } : x))}
+                      placeholder="费用名称（如：超大件费）"
+                      placeholderTextColor={colors.muted}
+                    />
+                    <TextInput
+                      style={[styles.surchargeInput, { flex: 1, borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                      value={s.amount}
+                      onChangeText={v => setManualSurcharges(prev => prev.map((x, j) => j === i ? { ...x, amount: v } : x))}
+                      placeholder="金额"
+                      placeholderTextColor={colors.muted}
+                      keyboardType="decimal-pad"
+                    />
+                    <TouchableOpacity onPress={() => setManualSurcharges(prev => prev.filter((_, j) => j !== i))}>
+                      <Text style={{ color: "#EF4444", padding: 8, fontSize: 18 }}>×</Text>
+                    </TouchableOpacity>
                   </View>
                 ))}
-              </View>
-            )}
+                <TouchableOpacity
+                  style={[styles.addSurchargeBtn, { borderColor: colors.border }]}
+                  onPress={() => setManualSurcharges(prev => [...prev, { name: "", amount: "" }])}
+                >
+                  <Text style={[styles.addSurchargeBtnText, { color: colors.primary }]}>+ 添加附加费</Text>
+                </TouchableOpacity>
 
-            {quote.status === "pending" && (
-              <View style={styles.actionBar}>
-                {aiParseStatus === "parsed" && (
-                  <TouchableOpacity
-                    style={[styles.btn, { borderColor: "#7DD3FC", backgroundColor: "#F0F9FF" }]}
-                    onPress={() => handleAiQuote(quote.id)}
-                    disabled={aiQuoting === quote.id}
-                  >
-                    <Text style={[styles.btnText, { color: "#0284C7" }]}>
-                      {aiQuoting === quote.id ? "🤖 AI 报价中..." : "🤖 AI 自动报价"}
+                <View style={[styles.row, isWide && { flexDirection: "row" }]}>
+                  <View style={[styles.formGroup, isWide && { flex: 1 }]}>
+                    <Text style={[styles.label, { color: colors.muted }]}>价格调整金额（负数为减价）</Text>
+                    <TextInput
+                      style={[styles.input, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                      value={adjustAmount}
+                      onChangeText={setAdjustAmount}
+                      placeholder="0.00"
+                      placeholderTextColor={colors.muted}
+                      keyboardType="decimal-pad"
+                    />
+                  </View>
+                  <View style={[styles.formGroup, isWide && { flex: 2 }]}>
+                    <Text style={[styles.label, { color: colors.muted }]}>调整说明</Text>
+                    <TextInput
+                      style={[styles.input, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                      value={adjustNote}
+                      onChangeText={setAdjustNote}
+                      placeholder="如：大客户折扣、节日优惠"
+                      placeholderTextColor={colors.muted}
+                    />
+                  </View>
+                </View>
+
+                <View style={[styles.row, isWide && { flexDirection: "row" }]}>
+                  <View style={[styles.formGroup, isWide && { flex: 1 }]}>
+                    <Text style={[styles.label, { color: colors.muted }]}>客户名称</Text>
+                    <TextInput
+                      style={[styles.input, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                      value={clientName}
+                      onChangeText={setClientName}
+                      placeholder="用于报价单抬头"
+                      placeholderTextColor={colors.muted}
+                    />
+                  </View>
+                  <View style={[styles.formGroup, isWide && { flex: 1 }]}>
+                    <Text style={[styles.label, { color: colors.muted }]}>有效期</Text>
+                    <TextInput
+                      style={[styles.input, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                      value={confirmExpiry}
+                      onChangeText={setConfirmExpiry}
+                      placeholder="如：7天"
+                      placeholderTextColor={colors.muted}
+                    />
+                  </View>
+                </View>
+
+                <View style={styles.formGroup}>
+                  <Text style={[styles.label, { color: colors.muted }]}>备注（出现在报价单中）</Text>
+                  <TextInput
+                    style={[styles.input, styles.textarea, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+                    value={quoteNote}
+                    onChangeText={setQuoteNote}
+                    placeholder="运费不含保险、关税等其他费用"
+                    placeholderTextColor={colors.muted}
+                    multiline
+                    numberOfLines={3}
+                  />
+                </View>
+
+                <View style={styles.exportRow}>
+                  <View style={[styles.finalPriceBox, { backgroundColor: colors.primary + "10", borderColor: colors.primary + "40" }]}>
+                    <Text style={[styles.finalPriceLabel, { color: colors.muted }]}>最终报价</Text>
+                    <Text style={[styles.finalPrice, { color: colors.primary }]}>
+                      {currency} {finalTotal.toFixed(2)}
                     </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.exportBtn, { backgroundColor: "#1e40af" }]}
+                    onPress={handleExportPDF}
+                  >
+                    <IconSymbol name="doc.text.fill" size={16} color="#fff" />
+                    <Text style={styles.exportBtnText}>导出PDF报价单</Text>
                   </TouchableOpacity>
-                )}
-                <TouchableOpacity
-                  style={[styles.btn, { borderColor: "#93C5FD", backgroundColor: "#EFF6FF" }]}
-                  onPress={() => handleUploadQuoteFile(quote.id)}
-                  disabled={uploadingFileId === quote.id}
-                >
-                  <Text style={[styles.btnText, { color: "#2563EB" }]}>
-                    {uploadingFileId === quote.id ? "上传中..." : "📂 上传报价单"}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.btn, styles.btnDanger, { borderColor: "#FCA5A5" }]}
-                  onPress={() => handleRejectQuote(quote)}
-                >
-                  <Text style={[styles.btnText, { color: "#EF4444" }]}>✗ 拒绝</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.btn, styles.btnPrimary, { backgroundColor: colors.primary }]}
-                  onPress={() => {
-                    setConfirmModal({ visible: true, quote });
-                    setConfirmContact(user?.name || "");
-                  }}
-                >
-                  <Text style={[styles.btnText, { color: "#fff" }]}>✓ 确认发出</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-            {quote.status === "confirmed" && (
-              <View style={styles.actionBar}>
-                <TouchableOpacity
-                  style={[styles.btn, { borderColor: "#93C5FD", backgroundColor: "#EFF6FF" }]}
-                  onPress={() => handleUploadQuoteFile(quote.id)}
-                  disabled={uploadingFileId === quote.id}
-                >
-                  <Text style={[styles.btnText, { color: "#2563EB" }]}>
-                    {uploadingFileId === quote.id ? "上传中..." : (quote.quoteFileUrl ? "📂 更新报价单" : "📂 上传报价单")}
-                  </Text>
-                </TouchableOpacity>
-                <Text style={{ color: "#10B981", fontSize: 13, flex: 1, textAlign: "right" }}>✓ 已确认发出 · {quote.confirmedByName || ""} · {quote.confirmedAt ? new Date(quote.confirmedAt).toLocaleString("zh-CN") : ""}</Text>
-              </View>
-            )}
-            {quote.status === "rejected" && (
-              <View style={styles.actionBar}>
-                <Text style={{ color: "#EF4444", fontSize: 13 }}>✗ 已拒绝 · {quote.adminNote || ""}</Text>
-              </View>
+                </View>
+              </>
             )}
           </View>
         )}
@@ -645,623 +551,340 @@ export default function QuoteManageScreen() {
     );
   };
 
-  // 渲染 Sheet 表格（通用）
-  const renderSheetTable = (sheet: SheetData, maxRows?: number) => {
-    const displayRows = maxRows ? sheet.rows.slice(0, maxRows) : sheet.rows;
-    return (
-      <ScrollView horizontal showsHorizontalScrollIndicator={true} style={{ marginTop: 8 }}>
-        <View>
-          {/* 表头 */}
-          <View style={{ flexDirection: "row", backgroundColor: colors.primary + "12", borderBottomWidth: 1, borderBottomColor: colors.border }}>
-            {sheet.headers.map((h: string, i: number) => (
-              <View key={i} style={{ minWidth: 100, maxWidth: 200, paddingHorizontal: 8, paddingVertical: 6, borderRightWidth: 1, borderRightColor: colors.border }}>
-                <Text style={{ fontSize: 12, fontWeight: "600", color: colors.foreground }} numberOfLines={2}>{h || `列${i + 1}`}</Text>
-              </View>
+  const renderInquiry = (q: QuoteRequest) => (
+    <InquiryCard
+      key={q.id}
+      q={q}
+      colors={colors}
+      expandedId={expandedId}
+      setExpandedId={setExpandedId}
+      inlineCalcId={inlineCalcId}
+      inlineResult={inlineResult}
+      handleInlineCalc={handleInlineCalc}
+      onConfirm={() => { setConfirmModal({ visible: true, quote: q }); setConfirmNote(""); }}
+      onReject={() => handleReject(q)}
+    />
+  );
+
+  const renderInquiriesTab = () => (
+    <View>
+      <View style={styles.filterBar}>
+        {(["pending", "confirmed", "rejected"] as const).map(s => (
+          <TouchableOpacity
+            key={s}
+            style={[styles.filterBtn, statusFilter === s && { backgroundColor: colors.primary + "20", borderColor: colors.primary }]}
+            onPress={() => setStatusFilter(s)}
+          >
+            <Text style={[styles.filterBtnText, { color: statusFilter === s ? colors.primary : colors.muted }]}>
+              {s === "pending" ? "待处理" : s === "confirmed" ? "已确认" : "已拒绝"}
+            </Text>
+          </TouchableOpacity>
+        ))}
+        <TouchableOpacity
+          style={[styles.refreshBtn, { borderColor: colors.border }]}
+          onPress={loadInquiries}
+        >
+          <Text style={[styles.refreshBtnText, { color: colors.muted }]}>刷新</Text>
+        </TouchableOpacity>
+      </View>
+
+      {inquiriesLoading ? (
+        <View style={styles.center}><ActivityIndicator size="large" color={colors.primary} /></View>
+      ) : inquiries.length === 0 ? (
+        <View style={styles.empty}>
+          <Text style={[styles.emptyText, { color: colors.muted }]}>暂无{statusFilter === "pending" ? "待处理" : statusFilter === "confirmed" ? "已确认" : "已拒绝"}询价</Text>
+        </View>
+      ) : (
+        inquiries.map(renderInquiry)
+      )}
+    </View>
+  );
+
+  const renderConfirmModal = () => (
+    <Modal visible={confirmModal.visible} transparent animationType="fade">
+      <View style={styles.modalOverlay}>
+        <View style={[styles.modalBox, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <Text style={[styles.modalTitle, { color: colors.foreground }]}>确认报价</Text>
+          <Text style={[styles.modalSub, { color: colors.muted }]}>{confirmModal.quote?.quoteNo} · {confirmModal.quote?.customerName}</Text>
+          <View style={styles.formGroup}>
+            <Text style={[styles.label, { color: colors.muted }]}>报价备注（将出现在邮件中）</Text>
+            <TextInput
+              style={[styles.input, styles.textarea, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+              value={confirmNote}
+              onChangeText={setConfirmNote}
+              placeholder="如：报价有效期7天，不含关税"
+              placeholderTextColor={colors.muted}
+              multiline
+              numberOfLines={4}
+            />
+          </View>
+          <View style={styles.formGroup}>
+            <Text style={[styles.label, { color: colors.muted }]}>有效期</Text>
+            <TextInput
+              style={[styles.input, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
+              value={confirmExpiry}
+              onChangeText={setConfirmExpiry}
+              placeholder="如：2025-12-31 或 7天"
+              placeholderTextColor={colors.muted}
+            />
+          </View>
+          <View style={styles.modalActions}>
+            <TouchableOpacity
+              style={[styles.modalCancelBtn, { borderColor: colors.border }]}
+              onPress={() => setConfirmModal({ visible: false, quote: null })}
+            >
+              <Text style={[styles.modalCancelText, { color: colors.muted }]}>取消</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.modalConfirmBtn, { backgroundColor: "#10B981" }]} onPress={handleConfirm}>
+              <Text style={styles.modalConfirmText}>确认发送</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+
+  const content = (
+    <AuthGuard>
+      <ScreenContainer>
+        <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 60 }}>
+          <View style={styles.pageHeader}>
+            <Text style={[styles.pageTitle, { color: colors.foreground }]}>半自动报价</Text>
+            <Text style={[styles.pageDesc, { color: colors.muted }]}>内部核价工具 · 选择报价表 → 输入货物 → 查看计算公式 → 导出PDF</Text>
+          </View>
+
+          <View style={styles.tabs}>
+            {([["calc", "核价计算器"], ["inquiries", "客户询价审核"]] as const).map(([key, label]) => (
+              <TouchableOpacity
+                key={key}
+                style={[styles.tab, activeTab === key && { borderBottomColor: colors.primary, borderBottomWidth: 2 }]}
+                onPress={() => setActiveTab(key)}
+              >
+                <Text style={[styles.tabText, { color: activeTab === key ? colors.primary : colors.muted }]}>{label}</Text>
+              </TouchableOpacity>
             ))}
           </View>
-          {/* 数据行 */}
-          {displayRows.map((row: string[], rIdx: number) => (
-            <View key={rIdx} style={{ flexDirection: "row", borderBottomWidth: 1, borderBottomColor: colors.border + "40", backgroundColor: rIdx % 2 === 0 ? "transparent" : colors.surface }}>
-              {sheet.headers.map((_: string, cIdx: number) => (
-                <View key={cIdx} style={{ minWidth: 100, maxWidth: 200, paddingHorizontal: 8, paddingVertical: 5, borderRightWidth: 1, borderRightColor: colors.border + "30" }}>
-                  <Text style={{ fontSize: 12, color: colors.foreground }} numberOfLines={3}>{row[cIdx] || ""}</Text>
+
+          {activeTab === "calc" ? renderCalcTab() : renderInquiriesTab()}
+        </ScrollView>
+        {renderConfirmModal()}
+      </ScreenContainer>
+    </AuthGuard>
+  );
+
+  return <WebLayout>{content}</WebLayout>;
+}
+
+function InquiryCard({
+  q, colors, expandedId, setExpandedId, inlineCalcId, inlineResult, handleInlineCalc, onConfirm, onReject,
+}: {
+  q: QuoteRequest; colors: any; expandedId: number | null; setExpandedId: (id: number | null) => void;
+  inlineCalcId: number | null; inlineResult: CalcResult | null;
+  handleInlineCalc: (q: QuoteRequest, ch: string) => void;
+  onConfirm: () => void; onReject: () => void;
+}) {
+  const [selectedChannel, setSelectedChannel] = useState("");
+  const isExpanded = expandedId === q.id;
+  const statusColor = q.status === "confirmed" ? "#10B981" : q.status === "rejected" ? "#EF4444" : "#F59E0B";
+  const statusLabel = q.status === "confirmed" ? "已确认" : q.status === "rejected" ? "已拒绝" : "待处理";
+
+  return (
+    <View style={[styles.inquiryCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+      <TouchableOpacity style={styles.inquiryHeader} onPress={() => setExpandedId(isExpanded ? null : q.id)}>
+        <View style={styles.inquiryHeaderLeft}>
+          <Text style={[styles.inquiryNo, { color: colors.primary }]}>{q.quoteNo}</Text>
+          <Text style={[styles.inquiryCustomer, { color: colors.foreground }]}>
+            {q.customerName} {q.customerCompany ? `(${q.customerCompany})` : ""}
+          </Text>
+          <Text style={[styles.inquiryMeta, { color: colors.muted }]}>
+            {q.itemCount}件 · {(q.totalWeight || 0).toFixed(1)}kg · {q.createdAt?.slice(0, 10)}
+          </Text>
+        </View>
+        <View style={[styles.statusTag, { backgroundColor: statusColor + "20" }]}>
+          <Text style={[styles.statusTagText, { color: statusColor }]}>{statusLabel}</Text>
+        </View>
+      </TouchableOpacity>
+
+      {isExpanded && (
+        <View style={styles.inquiryBody}>
+          {q.items?.length > 0 && (
+            <View style={[styles.itemsList, { backgroundColor: colors.background, borderColor: colors.border }]}>
+              <Text style={[styles.label, { color: colors.muted, marginBottom: 6 }]}>货物清单</Text>
+              {q.items.map((item: any, i: number) => (
+                <View key={i} style={styles.itemRow}>
+                  <Text style={[styles.itemName, { color: colors.foreground }]}>{item.name || `货物${i + 1}`}</Text>
+                  <Text style={[styles.itemDetail, { color: colors.muted }]}>
+                    {item.country} · {item.weight}kg · {item.volume || 0}m³
+                  </Text>
                 </View>
               ))}
             </View>
-          ))}
-          {maxRows && sheet.rows.length > maxRows && (
-            <View style={{ paddingVertical: 8, alignItems: "center" }}>
-              <Text style={{ fontSize: 12, color: colors.muted }}>… 还有 {sheet.rows.length - maxRows} 行数据</Text>
-            </View>
-          )}
-        </View>
-      </ScrollView>
-    );
-  };
-
-  // Sheet Tab 切换组件
-  const renderSheetTabs = (sheets: SheetData[], activeIdx: number, onSelect: (idx: number) => void) => (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
-      <View style={{ flexDirection: "row", gap: 6 }}>
-        {sheets.map((s: SheetData, i: number) => (
-          <TouchableOpacity
-            key={i}
-            style={[{
-              paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16,
-              backgroundColor: i === activeIdx ? colors.primary : colors.surface,
-              borderWidth: 1, borderColor: i === activeIdx ? colors.primary : colors.border,
-            }]}
-            onPress={() => onSelect(i)}
-          >
-            <Text style={{ fontSize: 12, color: i === activeIdx ? "#fff" : colors.foreground }} numberOfLines={1}>{s.name}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-    </ScrollView>
-  );
-
-  // 价格表管理
-  const renderPricesTab = () => (
-    <View>
-      {/* 格式说明 */}
-      <View style={[styles.hintBox, { backgroundColor: "#EFF4FF", borderColor: "#BFD0FE" }]}>
-        <Text style={{ fontSize: 13, color: "#1A56DB", lineHeight: 20 }}>
-          📋 上传您的报价表 Excel，系统将原样保存所有 Sheet 数据。{"\n"}
-          客户提交询价时，系统会根据目的国和品类自动定位到对应的 Sheet 和价格区域，辅助您快速报价。{"\n"}
-          支持任意格式的 Excel 报价表，无需固定列名。
-        </Text>
-      </View>
-
-      {/* 上传区域 */}
-      <TouchableOpacity
-        style={[styles.uploadZone, { borderColor: colors.border }]}
-        onPress={handleFileUpload}
-      >
-        <Text style={{ fontSize: 36, marginBottom: 8 }}>📤</Text>
-        <Text style={[styles.uploadTitle, { color: colors.foreground }]}>点击上传报价表</Text>
-        <Text style={[styles.uploadHint, { color: colors.muted }]}>支持 .xlsx / .xls / .csv</Text>
-      </TouchableOpacity>
-
-      {/* 上传预览：原样展示 Sheet 数据 */}
-      {uploadPreview && (
-        <View style={[styles.previewCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-          <View style={styles.previewHeader}>
-            <Text style={[styles.previewTitle, { color: colors.foreground }]}>
-              {uploadPreview.fileName}
-            </Text>
-            <Text style={[styles.previewMeta, { color: colors.muted }]}>
-              {uploadPreview.sheets.length} 个 Sheet · 共 {uploadPreview.totalRows} 行数据
-            </Text>
-          </View>
-
-          {/* Sheet Tab 切换 */}
-          {uploadPreview.sheets.length > 1 && renderSheetTabs(uploadPreview.sheets, activeSheetIdx, setActiveSheetIdx)}
-
-          {/* 当前 Sheet 表格预览 */}
-          {uploadPreview.sheets[activeSheetIdx] && (
-            <View style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 8, overflow: "hidden" }}>
-              <View style={{ backgroundColor: colors.primary + "08", paddingHorizontal: 12, paddingVertical: 6 }}>
-                <Text style={{ fontSize: 13, fontWeight: "600", color: colors.primary }}>
-                  {uploadPreview.sheets[activeSheetIdx].name}
-                  <Text style={{ fontWeight: "400", color: colors.muted }}> ({uploadPreview.sheets[activeSheetIdx].rows.length} 行)</Text>
-                </Text>
-              </View>
-              {renderSheetTable(uploadPreview.sheets[activeSheetIdx], 8)}
-            </View>
           )}
 
-          <View style={[styles.actionBar, { marginTop: 12 }]}>
-            <TouchableOpacity style={[styles.btn, { borderColor: colors.border }]} onPress={() => setUploadPreview(null)}>
-              <Text style={[styles.btnText, { color: colors.foreground }]}>取消</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.btn, styles.btnPrimary, { backgroundColor: colors.primary }]} onPress={handleConfirmUpload}>
-              <Text style={[styles.btnText, { color: "#fff" }]}>✓ 确认上传生效</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      )}
-
-      {/* 当前价格表信息 + 原样浏览 */}
-      {priceTable && (
-        <View style={[styles.previewCard, { backgroundColor: colors.surface, borderColor: colors.border, marginTop: 16 }]}>
-          <View style={styles.previewHeader}>
-            <Text style={[styles.previewTitle, { color: colors.foreground }]}>当前生效：{priceTable.fileName}</Text>
-            <Text style={[styles.previewMeta, { color: colors.muted }]}>
-              V{priceTable.version} · {priceTable.uploadedByName || "—"} 上传
-            </Text>
-          </View>
-
-          {/* AI 解析状态栏 */}
-          <View style={[styles.aiStatusBar, {
-            backgroundColor: aiParseStatus === "parsed" ? "#F0FDF4" : aiParseStatus === "parsing" ? "#FFF7ED" : aiParseStatus === "failed" ? "#FEF2F2" : "#F8FAFC",
-            borderColor: aiParseStatus === "parsed" ? "#BBF7D0" : aiParseStatus === "parsing" ? "#FED7AA" : aiParseStatus === "failed" ? "#FECACA" : colors.border,
-          }]}>
-            <Text style={{ fontSize: 13, flex: 1, color: aiParseStatus === "parsed" ? "#16A34A" : aiParseStatus === "parsing" ? "#EA580C" : aiParseStatus === "failed" ? "#DC2626" : colors.muted }}>
-              {aiParseStatus === "idle" && "🤖 AI 未解析 — 点击右侧按钮启动 AI 智能解析价格规则"}
-              {aiParseStatus === "parsing" && "⏳ AI 正在解析中… 请稍后刷新"}
-              {aiParseStatus === "parsed" && `✅ AI 已解析完成，提取 ${aiRuleCount} 条价格规则`}
-              {aiParseStatus === "failed" && `❌ AI 解析失败: ${aiParseError || "未知错误"}`}
-            </Text>
-            <TouchableOpacity
-              style={[styles.btn, { backgroundColor: aiParseStatus === "parsing" ? "#F97316" : "#0EA5E9", borderWidth: 0 }]}
-              onPress={aiParseStatus === "parsing" ? loadData : handleAiParse}
-              disabled={aiParsing}
-            >
-              <Text style={[styles.btnText, { color: "#fff" }]}>
-                {aiParsing ? "启动中..." : aiParseStatus === "parsing" ? "🔄 刷新状态" : aiParseStatus === "parsed" ? "🔄 重新解析" : "🤖 AI 解析"}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* AI 规则查看/编辑按钮 */}
-          {aiParseStatus === "parsed" && (
-            <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
-              <TouchableOpacity
-                style={[styles.btn, { backgroundColor: "#EFF6FF", borderColor: "#93C5FD" }]}
-                onPress={handleLoadAiRules}
-                disabled={aiRulesLoading}
-              >
-                <Text style={[styles.btnText, { color: "#1D4ED8" }]}>
-                  {aiRulesLoading ? "加载中..." : "📊 查看 AI 计算逻辑"}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          )}
-
-          {/* AI 规则明细表格 */}
-          {aiRulesVisible && aiRules.length > 0 && (
-            <View style={{ marginTop: 12, borderWidth: 1, borderColor: "#BAE6FD", borderRadius: 10, overflow: "hidden", backgroundColor: "#F0F9FF" }}>
-              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 12, backgroundColor: "#E0F2FE" }}>
-                <Text style={{ fontSize: 14, fontWeight: "600", color: "#0369A1" }}>🧠 AI 解析规则明细（{aiRules.length} 条）</Text>
-                <View style={{ flexDirection: "row", gap: 6 }}>
+          {q.status === "pending" && (
+            <View style={styles.pricingPanel}>
+              <Text style={[styles.label, { color: colors.muted }]}>快速核价：选择渠道</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
+                {CHANNELS.map(ch => (
                   <TouchableOpacity
-                    style={[styles.btn, { backgroundColor: "#10B981", borderWidth: 0, paddingVertical: 5, paddingHorizontal: 10 }]}
-                    onPress={handleAddRule}
+                    key={ch}
+                    style={[styles.chip, selectedChannel === ch && { backgroundColor: colors.primary + "20", borderColor: colors.primary }]}
+                    onPress={() => setSelectedChannel(ch)}
                   >
-                    <Text style={{ fontSize: 12, color: "#fff", fontWeight: "500" }}>+ 新增</Text>
+                    <Text style={[styles.chipText, { color: selectedChannel === ch ? colors.primary : colors.muted }]}>{ch}</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.btn, { backgroundColor: "#0284C7", borderWidth: 0, paddingVertical: 5, paddingHorizontal: 10 }]}
-                    onPress={handleSaveAllRules}
-                  >
-                    <Text style={{ fontSize: 12, color: "#fff", fontWeight: "500" }}>💾 保存修改</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.btn, { borderColor: "#94A3B8", paddingVertical: 5, paddingHorizontal: 10 }]}
-                    onPress={() => setAiRulesVisible(false)}
-                  >
-                    <Text style={{ fontSize: 12, color: "#64748B", fontWeight: "500" }}>收起</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-              {/* 规则表头 */}
-              <ScrollView horizontal showsHorizontalScrollIndicator={true}>
-                <View style={{ minWidth: 900 }}>
-                  <View style={{ flexDirection: "row", paddingVertical: 8, paddingHorizontal: 10, backgroundColor: "#DBEAFE", borderBottomWidth: 1, borderBottomColor: "#BAE6FD" }}>
-                    <Text style={{ width: 30, fontSize: 11, fontWeight: "600", color: "#1E40AF" }}>#</Text>
-                    <Text style={{ width: 100, fontSize: 11, fontWeight: "600", color: "#1E40AF" }}>线路</Text>
-                    <Text style={{ width: 70, fontSize: 11, fontWeight: "600", color: "#1E40AF" }}>运输方式</Text>
-                    <Text style={{ width: 70, fontSize: 11, fontWeight: "600", color: "#1E40AF" }}>目的国</Text>
-                    <Text style={{ width: 70, fontSize: 11, fontWeight: "600", color: "#1E40AF" }}>品类</Text>
-                    <Text style={{ width: 90, fontSize: 11, fontWeight: "600", color: "#1E40AF" }}>计费单位</Text>
-                    <Text style={{ width: 90, fontSize: 11, fontWeight: "600", color: "#1E40AF" }}>区间条件</Text>
-                    <Text style={{ width: 70, fontSize: 11, fontWeight: "600", color: "#1E40AF" }}>单价</Text>
-                    <Text style={{ width: 50, fontSize: 11, fontWeight: "600", color: "#1E40AF" }}>币种</Text>
-                    <Text style={{ width: 80, fontSize: 11, fontWeight: "600", color: "#1E40AF" }}>时效</Text>
-                    <Text style={{ width: 120, fontSize: 11, fontWeight: "600", color: "#1E40AF" }}>操作</Text>
-                  </View>
-                  {/* 规则行 */}
-                  {aiRules.map((rule, idx) => (
-                    <View key={idx} style={{ flexDirection: "row", paddingVertical: 7, paddingHorizontal: 10, borderBottomWidth: 1, borderBottomColor: "#E0F2FE", backgroundColor: idx % 2 === 0 ? "#F8FAFC" : "#FFFFFF" }}>
-                      <Text style={{ width: 30, fontSize: 11, color: "#64748B" }}>{idx + 1}</Text>
-                      <Text style={{ width: 100, fontSize: 11, color: "#0F172A" }} numberOfLines={1}>{rule.route || "-"}</Text>
-                      <Text style={{ width: 70, fontSize: 11, color: "#0F172A" }}>{rule.transportMethod || "-"}</Text>
-                      <Text style={{ width: 70, fontSize: 11, color: "#0F172A" }}>{rule.destinationCountry || "-"}</Text>
-                      <Text style={{ width: 70, fontSize: 11, color: "#0F172A" }}>{rule.category || "-"}</Text>
-                      <Text style={{ width: 90, fontSize: 11, color: "#0F172A" }}>{rule.pricingUnit || "-"}</Text>
-                      <Text style={{ width: 90, fontSize: 11, color: "#0F172A" }}>{rule.volumeOrWeightRange || "-"}</Text>
-                      <Text style={{ width: 70, fontSize: 11, color: "#DC2626", fontWeight: "600" }}>{rule.unitPrice}</Text>
-                      <Text style={{ width: 50, fontSize: 11, color: "#0F172A" }}>{rule.currency || "RMB"}</Text>
-                      <Text style={{ width: 80, fontSize: 11, color: "#0F172A" }}>{rule.transitTime || "-"}</Text>
-                      <View style={{ width: 120, flexDirection: "row", gap: 4 }}>
-                        <TouchableOpacity onPress={() => handleEditRule(idx)} style={{ backgroundColor: "#DBEAFE", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
-                          <Text style={{ fontSize: 10, color: "#1D4ED8" }}>编辑</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity onPress={() => handleDeleteRule(idx)} style={{ backgroundColor: "#FEE2E2", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
-                          <Text style={{ fontSize: 10, color: "#DC2626" }}>删除</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  ))}
-                </View>
+                ))}
               </ScrollView>
-              <View style={{ padding: 10, backgroundColor: "#E0F2FE", borderTopWidth: 1, borderTopColor: "#BAE6FD" }}>
-                <Text style={{ fontSize: 11, color: "#475569" }}>
-                  💡 提示：您可以编辑或删除不准确的规则，新增缺失的规则，修改后点击"保存修改"即可生效。AI 报价时将使用调整后的规则。
-                </Text>
-              </View>
-            </View>
-          )}
-
-          {/* 加载并展示已保存的 Sheet 数据 */}
-          {loadedSheets.length > 0 && (
-            <View style={{ marginTop: 12 }}>
-              {loadedSheets.length > 1 && renderSheetTabs(loadedSheets, loadedSheetIdx, setLoadedSheetIdx)}
-              {loadedSheets[loadedSheetIdx] && (
-                <View style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 8, overflow: "hidden" }}>
-                  <View style={{ backgroundColor: colors.primary + "08", paddingHorizontal: 12, paddingVertical: 6 }}>
-                    <Text style={{ fontSize: 13, fontWeight: "600", color: colors.primary }}>
-                      {loadedSheets[loadedSheetIdx].name}
-                      <Text style={{ fontWeight: "400", color: colors.muted }}> ({loadedSheets[loadedSheetIdx].rows.length} 行)</Text>
-                    </Text>
-                  </View>
-                  {renderSheetTable(loadedSheets[loadedSheetIdx])}
+              <TouchableOpacity
+                style={[styles.smallCalcBtn, { backgroundColor: colors.primary }]}
+                onPress={() => handleInlineCalc(q, selectedChannel)}
+                disabled={inlineCalcId === q.id}
+              >
+                {inlineCalcId === q.id ? <ActivityIndicator color="#fff" size="small" /> :
+                  <Text style={styles.smallCalcBtnText}>计算报价</Text>}
+              </TouchableOpacity>
+              {inlineResult && inlineCalcId === null && expandedId === q.id && (
+                <View style={[styles.inlineResult, { backgroundColor: colors.primary + "08", borderColor: colors.primary + "30" }]}>
+                  {inlineResult.success ? (
+                    <>
+                      <Text style={[styles.inlineFormula, { color: colors.primary }]}>{inlineResult.freightFormula}</Text>
+                      <Text style={[styles.inlineTotal, { color: colors.foreground }]}>
+                        合计：{inlineResult.currency} {inlineResult.totalPrice?.toFixed(2)}
+                      </Text>
+                    </>
+                  ) : (
+                    <Text style={{ color: "#EF4444", fontSize: 13 }}>{inlineResult.message}</Text>
+                  )}
                 </View>
               )}
             </View>
           )}
-          {loadedSheets.length === 0 && (
-            <TouchableOpacity
-              style={[styles.btn, { marginTop: 8, alignSelf: "flex-start" }]}
-              onPress={async () => {
-                try {
-                  const res = await api.getCurrentPriceTable();
-                  if (res.success && res.priceTable?.rulesJson) {
-                    const parsed = JSON.parse(res.priceTable.rulesJson);
-                    if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].name) {
-                      setLoadedSheets(parsed as SheetData[]);
-                    }
-                  }
-                } catch (e) { console.error(e); }
-              }}
-            >
-              <Text style={[styles.btnText, { color: colors.primary }]}>👁 查看报价表内容</Text>
-            </TouchableOpacity>
+
+          {q.status === "pending" && (
+            <View style={styles.actionRow}>
+              <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: "#10B981" }]} onPress={onConfirm}>
+                <Text style={styles.actionBtnText}>确认报价</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.rejectBtn, { borderColor: "#EF4444" }]} onPress={onReject}>
+                <Text style={[styles.rejectBtnText, { color: "#EF4444" }]}>拒绝</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {q.adminNote && (
+            <View style={[styles.noteBox, { backgroundColor: colors.background, borderColor: colors.border }]}>
+              <Text style={[styles.label, { color: colors.muted }]}>备注</Text>
+              <Text style={[styles.noteText, { color: colors.foreground }]}>{q.adminNote}</Text>
+            </View>
           )}
         </View>
       )}
     </View>
   );
+}
 
-  const content = (
-    <ScreenContainer>
-      <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
-        {/* 页面标题 */}
-        <View style={styles.pageHeader}>
-          <Text style={[styles.pageTitle, { color: colors.foreground }]}>半自动报价</Text>
-          <Text style={[styles.pageDesc, { color: colors.muted }]}>
-            客户提交清单 → 系统自动套价 → 人工确认 → 推送客户
-          </Text>
-        </View>
-
-        {/* Tab 切换 */}
-        <View style={[styles.tabBar, { borderColor: colors.border }]}>
-          <TouchableOpacity
-            style={[styles.tabBtn, activeTab === "quotes" && { backgroundColor: colors.background }]}
-            onPress={() => setActiveTab("quotes")}
-          >
-            <Text style={[styles.tabBtnText, { color: activeTab === "quotes" ? colors.foreground : colors.muted }]}>
-              报价审核 {stats.pending > 0 ? `(${stats.pending})` : ""}
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tabBtn, activeTab === "prices" && { backgroundColor: colors.background }]}
-            onPress={() => setActiveTab("prices")}
-          >
-            <Text style={[styles.tabBtnText, { color: activeTab === "prices" ? colors.foreground : colors.muted }]}>
-              价格表管理
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.btn, { marginLeft: "auto", backgroundColor: colors.primary, borderWidth: 0 }]}
-            onPress={() => router.push("/quote-inquiry")}
-          >
-            <Text style={[styles.btnText, { color: "#fff" }]}>+ 新建报价</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.btn, { marginLeft: 8 }]} onPress={loadData}>
-            <Text style={[styles.btnText, { color: colors.primary }]}>
-              {refreshing ? "刷新中..." : "🔄 刷新"}
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {activeTab === "quotes" && (
-          <>
-            {renderStats()}
-            {/* 状态筛选 */}
-            <View style={styles.filterRow}>
-              {[
-                { key: "all", label: "全部" },
-                { key: "pending", label: "待审核" },
-                { key: "confirmed", label: "已确认" },
-                { key: "rejected", label: "已拒绝" },
-              ].map(f => (
-                <TouchableOpacity
-                  key={f.key}
-                  style={[styles.filterBtn, statusFilter === f.key && { backgroundColor: colors.primary + "15" }]}
-                  onPress={() => setStatusFilter(f.key)}
-                >
-                  <Text style={[styles.filterBtnText, { color: statusFilter === f.key ? colors.primary : colors.muted }]}>{f.label}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-            {/* 报价列表 */}
-            {quotes.length === 0 ? (
-              <View style={styles.emptyState}>
-                <Text style={{ fontSize: 36, marginBottom: 12 }}>📭</Text>
-                <Text style={[styles.emptyText, { color: colors.muted }]}>暂无报价请求</Text>
-                <Text style={[styles.emptyHint, { color: colors.muted }]}>客户端提交清单后会在此显示</Text>
-              </View>
-            ) : (
-              quotes.map(q => renderQuoteCard(q))
-            )}
-          </>
-        )}
-
-        {activeTab === "prices" && renderPricesTab()}
-      </ScrollView>
-
-      {/* 确认报价弹窗 */}
-      <Modal visible={confirmModal.visible} transparent animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { backgroundColor: colors.surface, maxWidth: isWide ? 500 : "90%" }]}>
-            <Text style={[styles.modalTitle, { color: colors.foreground }]}>确认发出报价</Text>
-            <Text style={[styles.modalDesc, { color: colors.muted }]}>
-              确认后客户将收到正式报价单
-            </Text>
-            <View style={styles.formGroup}>
-              <Text style={[styles.formLabel, { color: colors.muted }]}>备注/附加说明</Text>
-              <TextInput
-                style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                value={confirmNote}
-                onChangeText={setConfirmNote}
-                placeholder="可添加附加说明、税率提示等…"
-                placeholderTextColor={colors.muted}
-                multiline
-              />
-            </View>
-            <View style={styles.formGroup}>
-              <Text style={[styles.formLabel, { color: colors.muted }]}>有效期至</Text>
-              <TextInput
-                style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                value={confirmExpiry}
-                onChangeText={setConfirmExpiry}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={colors.muted}
-              />
-            </View>
-            <View style={styles.formGroup}>
-              <Text style={[styles.formLabel, { color: colors.muted }]}>联系人</Text>
-              <TextInput
-                style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                value={confirmContact}
-                onChangeText={setConfirmContact}
-                placeholder="您的姓名"
-                placeholderTextColor={colors.muted}
-              />
-            </View>
-            <View style={[styles.actionBar, { marginTop: 16 }]}>
-              <TouchableOpacity style={[styles.btn, { borderColor: colors.border }]} onPress={() => setConfirmModal({ visible: false, quote: null })}>
-                <Text style={[styles.btnText, { color: colors.foreground }]}>取消</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.btn, styles.btnPrimary, { backgroundColor: colors.primary }]} onPress={handleConfirmQuote}>
-                <Text style={[styles.btnText, { color: "#fff" }]}>✓ 确认发出</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* AI 规则编辑弹窗 */}
-      <Modal visible={editingRuleIdx !== null || addingRule} transparent animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { backgroundColor: colors.surface, maxWidth: isWide ? 600 : "95%" }]}>
-            <Text style={[styles.modalTitle, { color: colors.foreground }]}>
-              {addingRule ? "新增价格规则" : "编辑价格规则"}
-            </Text>
-            <Text style={[styles.modalDesc, { color: colors.muted }]}>
-              {addingRule ? "手动添加一条新的价格规则" : `编辑第 ${(editingRuleIdx ?? 0) + 1} 条规则`}
-            </Text>
-            {editingRule && (
-              <ScrollView style={{ maxHeight: 400 }}>
-                <View style={styles.formGroup}>
-                  <Text style={[styles.formLabel, { color: colors.muted }]}>线路名称</Text>
-                  <TextInput
-                    style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                    value={editingRule.route || ""}
-                    onChangeText={(v) => setEditingRule({ ...editingRule, route: v })}
-                    placeholder="如：深圳-巴西全境"
-                    placeholderTextColor={colors.muted}
-                  />
-                </View>
-                <View style={styles.formGroup}>
-                  <Text style={[styles.formLabel, { color: colors.muted }]}>运输方式</Text>
-                  <TextInput
-                    style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                    value={editingRule.transportMethod || ""}
-                    onChangeText={(v) => setEditingRule({ ...editingRule, transportMethod: v })}
-                    placeholder="如：海运拼箱/空运/铁路"
-                    placeholderTextColor={colors.muted}
-                  />
-                </View>
-                <View style={{ flexDirection: "row", gap: 10 }}>
-                  <View style={[styles.formGroup, { flex: 1 }]}>
-                    <Text style={[styles.formLabel, { color: colors.muted }]}>目的国</Text>
-                    <TextInput
-                      style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                      value={editingRule.destinationCountry || ""}
-                      onChangeText={(v) => setEditingRule({ ...editingRule, destinationCountry: v })}
-                      placeholder="如：巴西"
-                      placeholderTextColor={colors.muted}
-                    />
-                  </View>
-                  <View style={[styles.formGroup, { flex: 1 }]}>
-                    <Text style={[styles.formLabel, { color: colors.muted }]}>品类</Text>
-                    <TextInput
-                      style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                      value={editingRule.category || ""}
-                      onChangeText={(v) => setEditingRule({ ...editingRule, category: v })}
-                      placeholder="如：普货/电池/纳电"
-                      placeholderTextColor={colors.muted}
-                    />
-                  </View>
-                </View>
-                <View style={{ flexDirection: "row", gap: 10 }}>
-                  <View style={[styles.formGroup, { flex: 1 }]}>
-                    <Text style={[styles.formLabel, { color: colors.muted }]}>计费单位</Text>
-                    <TextInput
-                      style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                      value={editingRule.pricingUnit || ""}
-                      onChangeText={(v) => setEditingRule({ ...editingRule, pricingUnit: v })}
-                      placeholder="如：RMB/KG、RMB/CBM"
-                      placeholderTextColor={colors.muted}
-                    />
-                  </View>
-                  <View style={[styles.formGroup, { flex: 1 }]}>
-                    <Text style={[styles.formLabel, { color: colors.muted }]}>区间条件</Text>
-                    <TextInput
-                      style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                      value={editingRule.volumeOrWeightRange || ""}
-                      onChangeText={(v) => setEditingRule({ ...editingRule, volumeOrWeightRange: v })}
-                      placeholder="如：1-100kg、45-999CBM"
-                      placeholderTextColor={colors.muted}
-                    />
-                  </View>
-                </View>
-                <View style={{ flexDirection: "row", gap: 10 }}>
-                  <View style={[styles.formGroup, { flex: 1 }]}>
-                    <Text style={[styles.formLabel, { color: colors.muted }]}>单价 *</Text>
-                    <TextInput
-                      style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                      value={String(editingRule.unitPrice || "")}
-                      onChangeText={(v) => setEditingRule({ ...editingRule, unitPrice: parseFloat(v) || 0 })}
-                      placeholder="如：25.5"
-                      placeholderTextColor={colors.muted}
-                      keyboardType="numeric"
-                    />
-                  </View>
-                  <View style={[styles.formGroup, { flex: 1 }]}>
-                    <Text style={[styles.formLabel, { color: colors.muted }]}>币种</Text>
-                    <TextInput
-                      style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                      value={editingRule.currency || "RMB"}
-                      onChangeText={(v) => setEditingRule({ ...editingRule, currency: v })}
-                      placeholder="RMB/USD"
-                      placeholderTextColor={colors.muted}
-                    />
-                  </View>
-                </View>
-                <View style={styles.formGroup}>
-                  <Text style={[styles.formLabel, { color: colors.muted }]}>时效</Text>
-                  <TextInput
-                    style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                    value={editingRule.transitTime || ""}
-                    onChangeText={(v) => setEditingRule({ ...editingRule, transitTime: v })}
-                    placeholder="如：25-35天"
-                    placeholderTextColor={colors.muted}
-                  />
-                </View>
-                {editingRule.minimumCharge !== undefined && (
-                  <View style={styles.formGroup}>
-                    <Text style={[styles.formLabel, { color: colors.muted }]}>最低收费</Text>
-                    <TextInput
-                      style={[styles.formInput, { borderColor: colors.border, color: colors.foreground, backgroundColor: colors.background }]}
-                      value={String(editingRule.minimumCharge || "")}
-                      onChangeText={(v) => setEditingRule({ ...editingRule, minimumCharge: parseFloat(v) || 0 })}
-                      placeholder="最低收费金额"
-                      placeholderTextColor={colors.muted}
-                      keyboardType="numeric"
-                    />
-                  </View>
-                )}
-              </ScrollView>
-            )}
-            <View style={[styles.actionBar, { marginTop: 16 }]}>
-              <TouchableOpacity
-                style={[styles.btn, { borderColor: colors.border }]}
-                onPress={() => { setEditingRuleIdx(null); setEditingRule(null); setAddingRule(false); }}
-              >
-                <Text style={[styles.btnText, { color: colors.foreground }]}>取消</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.btn, styles.btnPrimary, { backgroundColor: colors.primary }]}
-                onPress={addingRule ? handleSaveNewRule : handleSaveEditRule}
-              >
-                <Text style={[styles.btnText, { color: "#fff" }]}>✓ 保存</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-    </ScreenContainer>
-  );
-
+function BreakdownRow({ label, formula, amount, highlight, colors }: { label: string; formula: string; amount: number; highlight?: boolean; colors: any }) {
   return (
-    <AuthGuard>
-      <WebLayout>{content}</WebLayout>
-    </AuthGuard>
+    <View style={[styles.breakdownRow, highlight && { backgroundColor: colors.primary + "05" }]}>
+      <Text style={[styles.bd, { color: colors.foreground, fontWeight: highlight ? "600" : "400" }]}>{label}</Text>
+      <Text style={[styles.bd, { flex: 2, color: colors.muted, fontSize: 12 }]}>{formula}</Text>
+      <Text style={[styles.bdRight, { color: highlight ? colors.primary : colors.foreground, fontWeight: highlight ? "700" : "500" }]}>
+        {amount.toFixed(2)}
+      </Text>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16 },
-  pageHeader: { marginBottom: 20 },
+  pageHeader: { marginBottom: 16 },
   pageTitle: { fontSize: 22, fontWeight: "700" },
   pageDesc: { fontSize: 13, marginTop: 4 },
-  tabBar: { flexDirection: "row", alignItems: "center", borderBottomWidth: 1, marginBottom: 16, paddingBottom: 8 },
-  tabBtn: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 6, marginRight: 4 },
-  tabBtnText: { fontSize: 14, fontWeight: "500" },
-  statsRow: { flexDirection: "row", gap: 10, marginBottom: 16, flexWrap: "wrap" },
-  statsRowWide: { flexWrap: "nowrap" },
-  statCard: { flex: 1, minWidth: 140, padding: 14, borderRadius: 12, borderWidth: 1 },
-  statLabel: { fontSize: 12, marginBottom: 4 },
-  statValue: { fontSize: 24, fontWeight: "700" },
-  statVersionText: { fontSize: 13, fontWeight: "600", marginTop: 2 },
-  filterRow: { flexDirection: "row", gap: 8, marginBottom: 14 },
-  filterBtn: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 16 },
-  filterBtnText: { fontSize: 13, fontWeight: "500" },
-  quoteCard: { borderWidth: 1, borderRadius: 12, marginBottom: 12, overflow: "hidden" },
-  quoteCardHeader: { flexDirection: "row", alignItems: "center", padding: 14, gap: 12 },
-  statusDot: { width: 8, height: 8, borderRadius: 4 },
-  quoteInfo: { flex: 1 },
-  quoteCustomer: { fontSize: 14, fontWeight: "500" },
-  quoteMeta: { fontSize: 12, marginTop: 2 },
-  quoteRight: { alignItems: "flex-end" },
-  quoteTotal: { fontSize: 17, fontWeight: "700" },
-  statusTag: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 12, marginTop: 4 },
-  statusTagText: { fontSize: 11, fontWeight: "500" },
-  quoteTime: { fontSize: 11, marginTop: 2 },
-  quoteCardBody: { padding: 16, borderTopWidth: 1 },
-  itemsTable: { borderWidth: 1, borderRadius: 8, overflow: "hidden" },
-  tableHeader: { flexDirection: "row", paddingVertical: 8, paddingHorizontal: 10 },
-  th: { flex: 1, fontSize: 11, fontWeight: "500" },
-  tableRow: { flexDirection: "row", paddingVertical: 9, paddingHorizontal: 10, borderTopWidth: 1 },
-  td: { flex: 1, fontSize: 12 },
-  actionBar: { flexDirection: "row", justifyContent: "flex-end", gap: 10, marginTop: 14 },
-  btn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: "transparent" },
-  btnText: { fontSize: 13, fontWeight: "500" },
-  btnPrimary: { borderWidth: 0 },
-  btnDanger: {},
-  hintBox: { padding: 14, borderRadius: 8, borderWidth: 1, marginBottom: 16 },
-  uploadZone: { borderWidth: 2, borderStyle: "dashed", borderRadius: 12, padding: 40, alignItems: "center", justifyContent: "center" },
-  uploadTitle: { fontSize: 15, fontWeight: "500", marginBottom: 4 },
-  uploadHint: { fontSize: 13 },
-  previewCard: { borderWidth: 1, borderRadius: 12, padding: 16, marginTop: 16 },
-  previewHeader: {},
-  previewTitle: { fontSize: 14, fontWeight: "600" },
-  previewMeta: { fontSize: 12, marginTop: 4 },
-  emptyState: { alignItems: "center", paddingVertical: 60 },
-  emptyText: { fontSize: 14, marginBottom: 4 },
-  emptyHint: { fontSize: 12 },
-  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "center", alignItems: "center" },
-  modalContent: { width: "90%", borderRadius: 14, padding: 24 },
-  modalTitle: { fontSize: 18, fontWeight: "700", marginBottom: 4 },
-  modalDesc: { fontSize: 13, marginBottom: 16 },
+  tabs: { flexDirection: "row", borderBottomWidth: 1, borderBottomColor: "#E5E7EB", marginBottom: 16 },
+  tab: { paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: "transparent" },
+  tabText: { fontSize: 14, fontWeight: "600" },
+  section: { borderWidth: 1, borderRadius: 12, padding: 16, marginBottom: 16 },
+  sectionTitle: { fontSize: 15, fontWeight: "700", marginBottom: 12 },
+  row: { gap: 12, marginBottom: 0 },
   formGroup: { marginBottom: 12 },
-  formLabel: { fontSize: 12, fontWeight: "500", marginBottom: 4 },
-  formInput: { borderWidth: 1, borderRadius: 8, padding: 10, fontSize: 14 },
-  quoteFileBar: { flexDirection: "row", alignItems: "center", padding: 10, borderRadius: 8, borderWidth: 1, marginBottom: 10, gap: 8 },
-  aiResultBox: { padding: 14, borderRadius: 10, borderWidth: 1, marginBottom: 12, marginTop: 8 },
-  aiStatusBar: { flexDirection: "row", alignItems: "center", padding: 12, borderRadius: 8, borderWidth: 1, marginTop: 12, gap: 8 },
+  label: { fontSize: 12, fontWeight: "500", marginBottom: 4 },
+  input: { borderWidth: 1, borderRadius: 8, padding: 10, fontSize: 14 },
+  textarea: { height: 80, textAlignVertical: "top" },
+  suggestRow: { marginTop: 6, flexGrow: 0 },
+  suggestChip: { borderWidth: 1, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, marginRight: 6 },
+  suggestText: { fontSize: 12 },
+  chip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: "#E5E7EB", marginRight: 6 },
+  chipText: { fontSize: 12, fontWeight: "500" },
+  calcBtn: { paddingVertical: 13, borderRadius: 10, alignItems: "center", marginTop: 4 },
+  calcBtnText: { color: "#fff", fontSize: 15, fontWeight: "600" },
+  resultHeader: { marginBottom: 12 },
+  tableRef: { fontSize: 12, marginTop: 4 },
+  formulaBox: { borderWidth: 1, borderRadius: 8, padding: 10, marginBottom: 14 },
+  formulaLabel: { fontSize: 11, fontWeight: "600", marginBottom: 4 },
+  formulaText: { fontSize: 13, lineHeight: 18 },
+  breakdownTable: { borderWidth: 1, borderRadius: 8, overflow: "hidden", marginBottom: 14 },
+  breakdownHeader: { flexDirection: "row", paddingVertical: 8, paddingHorizontal: 12 },
+  bh: { flex: 1, fontSize: 11, fontWeight: "600" },
+  bhRight: { width: 80, fontSize: 11, fontWeight: "600", textAlign: "right" },
+  breakdownRow: { flexDirection: "row", paddingVertical: 9, paddingHorizontal: 12, borderTopWidth: 1, borderTopColor: "#F3F4F6" },
+  bd: { flex: 1, fontSize: 13 },
+  bdRight: { width: 80, fontSize: 13, textAlign: "right" },
+  totalRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 10, paddingHorizontal: 12, borderTopWidth: 2 },
+  totalLabel: { fontSize: 14, fontWeight: "600" },
+  totalAmount: { fontSize: 16, fontWeight: "700" },
+  surchargeRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8 },
+  surchargeInput: { borderWidth: 1, borderRadius: 8, padding: 9, fontSize: 14 },
+  addSurchargeBtn: { borderWidth: 1, borderStyle: "dashed", borderRadius: 8, paddingVertical: 8, alignItems: "center", marginBottom: 14 },
+  addSurchargeBtnText: { fontSize: 13, fontWeight: "500" },
+  exportRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 16 },
+  finalPriceBox: { flex: 1, borderWidth: 1, borderRadius: 10, padding: 12 },
+  finalPriceLabel: { fontSize: 11, fontWeight: "500" },
+  finalPrice: { fontSize: 22, fontWeight: "700", marginTop: 2 },
+  exportBtn: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10 },
+  exportBtnText: { color: "#fff", fontSize: 14, fontWeight: "600" },
+  errorBox: { padding: 12, backgroundColor: "#FEF2F2", borderRadius: 8 },
+  errorText: { color: "#EF4444", fontSize: 14 },
+  filterBar: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 14 },
+  filterBtn: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 6, borderWidth: 1, borderColor: "#E5E7EB" },
+  filterBtnText: { fontSize: 13, fontWeight: "500" },
+  refreshBtn: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 6, borderWidth: 1, marginLeft: "auto" },
+  refreshBtnText: { fontSize: 12 },
+  center: { paddingTop: 40, alignItems: "center" },
+  empty: { paddingTop: 40, alignItems: "center" },
+  emptyText: { fontSize: 14 },
+  inquiryCard: { borderWidth: 1, borderRadius: 10, marginBottom: 10, overflow: "hidden" },
+  inquiryHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", padding: 12 },
+  inquiryHeaderLeft: { flex: 1 },
+  inquiryNo: { fontSize: 13, fontWeight: "700", marginBottom: 2 },
+  inquiryCustomer: { fontSize: 14, fontWeight: "600", marginBottom: 2 },
+  inquiryMeta: { fontSize: 12 },
+  statusTag: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
+  statusTagText: { fontSize: 12, fontWeight: "600" },
+  inquiryBody: { padding: 12, paddingTop: 0 },
+  itemsList: { borderWidth: 1, borderRadius: 8, padding: 10, marginBottom: 12 },
+  itemRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 4 },
+  itemName: { fontSize: 13, fontWeight: "500" },
+  itemDetail: { fontSize: 12 },
+  pricingPanel: { marginBottom: 12 },
+  smallCalcBtn: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 8, alignSelf: "flex-start", marginTop: 6 },
+  smallCalcBtnText: { color: "#fff", fontSize: 13, fontWeight: "600" },
+  inlineResult: { borderWidth: 1, borderRadius: 8, padding: 10, marginTop: 8 },
+  inlineFormula: { fontSize: 13, fontWeight: "500", marginBottom: 4 },
+  inlineTotal: { fontSize: 15, fontWeight: "700" },
+  actionRow: { flexDirection: "row", gap: 10, marginBottom: 10 },
+  confirmBtn: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: "center" },
+  rejectBtn: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 8, borderWidth: 1 },
+  actionBtnText: { color: "#fff", fontSize: 13, fontWeight: "600" },
+  rejectBtnText: { fontSize: 13, fontWeight: "600" },
+  noteBox: { borderWidth: 1, borderRadius: 8, padding: 10 },
+  noteText: { fontSize: 13, marginTop: 4 },
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center", padding: 20 },
+  modalBox: { width: "100%", maxWidth: 480, borderWidth: 1, borderRadius: 14, padding: 20 },
+  modalTitle: { fontSize: 17, fontWeight: "700", marginBottom: 4 },
+  modalSub: { fontSize: 13, marginBottom: 16 },
+  modalActions: { flexDirection: "row", gap: 10, marginTop: 16 },
+  modalCancelBtn: { flex: 1, borderWidth: 1, borderRadius: 8, paddingVertical: 10, alignItems: "center" },
+  modalCancelText: { fontSize: 14 },
+  modalConfirmBtn: { flex: 2, borderRadius: 8, paddingVertical: 10, alignItems: "center" },
+  modalConfirmText: { color: "#fff", fontSize: 14, fontWeight: "600" },
 });
