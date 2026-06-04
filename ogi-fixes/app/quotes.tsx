@@ -119,7 +119,7 @@ export default function QuotesScreen() {
 
     setUploading(true);
     try {
-      const res = await apiPost("/api/upload-price-table", {
+      const res = await apiPost("/api/price-table/upload", {
         fileName: uploadFileName,
         fileData: uploadFileData,
         contentType: uploadContentType,
