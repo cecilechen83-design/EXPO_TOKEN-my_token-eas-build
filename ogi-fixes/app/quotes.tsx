@@ -70,9 +70,7 @@ export default function QuotesScreen() {
   const [uploadValidFrom, setUploadValidFrom] = useState("");
   const [uploadValidTo, setUploadValidTo] = useState("");
   const [uploadFileName, setUploadFileName] = useState("");
-  const [uploadFileData, setUploadFileData] = useState("");
-  const [uploadContentType, setUploadContentType] = useState("");
-  const [parsedSheetNames, setParsedSheetNames] = useState<string[]>([]);
+  const [parsedSheets, setParsedSheets] = useState<{ name: string; headers: string[]; rows: string[][] }[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadTables = useCallback(async () => {
@@ -96,16 +94,26 @@ export default function QuotesScreen() {
       const XLSX = await import("xlsx");
       const buffer = await file.arrayBuffer();
       const wb = XLSX.read(buffer, { type: "array" });
-      setParsedSheetNames(wb.SheetNames);
 
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const b64 = (ev.target?.result as string).split(",")[1];
-        setUploadFileData(b64);
-        setUploadContentType(file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-        setUploadFileName(file.name);
-      };
-      reader.readAsDataURL(file);
+      const sheets: { name: string; headers: string[]; rows: string[][] }[] = [];
+      for (const sheetName of wb.SheetNames) {
+        const ws = wb.Sheets[sheetName];
+        const rawRows: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as any[][];
+        if (rawRows.length === 0) continue;
+        let headerIdx = 0;
+        for (let i = 0; i < Math.min(rawRows.length, 5); i++) {
+          if (rawRows[i].filter((c: any) => String(c).trim() !== "").length >= 2) { headerIdx = i; break; }
+        }
+        const headers = rawRows[headerIdx].map((c: any) => String(c).trim());
+        const dataRows = rawRows.slice(headerIdx + 1)
+          .filter((row: any[]) => row.some((c: any) => String(c).trim() !== ""))
+          .map((row: any[]) => row.map((c: any) => String(c).trim()));
+        sheets.push({ name: sheetName, headers, rows: dataRows });
+      }
+
+      if (sheets.length === 0) { showAlert("错误", "文件中未读取到有效数据"); return; }
+      setParsedSheets(sheets);
+      setUploadFileName(file.name);
       setShowUpload(true);
     } catch (err: any) {
       showAlert("解析失败", err.message);
@@ -115,14 +123,14 @@ export default function QuotesScreen() {
   const handleUpload = async () => {
     if (!uploadCountry.trim()) { showAlert("提示", "请填写目的国"); return; }
     if (!uploadChannel) { showAlert("提示", "请选择渠道"); return; }
-    if (!uploadFileData) { showAlert("提示", "请先选择报价表文件"); return; }
+    if (parsedSheets.length === 0) { showAlert("提示", "请先选择报价表文件"); return; }
 
     setUploading(true);
     try {
       const res = await apiPost("/api/price-table/upload", {
+        rules: parsedSheets,
         fileName: uploadFileName,
-        fileData: uploadFileData,
-        contentType: uploadContentType,
+        sheetNames: parsedSheets.map(s => s.name),
         country: uploadCountry.trim(),
         channel: uploadChannel,
         currency: uploadCurrency,
@@ -136,8 +144,7 @@ export default function QuotesScreen() {
         setShowUpload(false);
         setUploadCountry(""); setUploadChannel(""); setUploadCurrency("RMB");
         setUploadValidFrom(""); setUploadValidTo("");
-        setUploadFileName(""); setUploadFileData(""); setUploadContentType("");
-        setParsedSheetNames([]);
+        setUploadFileName(""); setParsedSheets([]);
         setTimeout(loadTables, 3000);
       } else {
         showAlert("上传失败", res.message || "请重试");
@@ -191,13 +198,13 @@ export default function QuotesScreen() {
         </TouchableOpacity>
       </View>
 
-      {parsedSheetNames.length > 0 && (
+      {parsedSheets.length > 0 && (
         <View style={[styles.sheetPreview, { backgroundColor: colors.background, borderColor: colors.border }]}>
           <Text style={[styles.sheetPreviewLabel, { color: colors.muted }]}>
-            已读取文件：{uploadFileName}（{parsedSheetNames.length} 个Sheet）
+            已读取文件：{uploadFileName}（{parsedSheets.length} 个Sheet，共 {parsedSheets.reduce((s, sh) => s + sh.rows.length, 0)} 行数据）
           </Text>
           <Text style={[styles.sheetPreviewText, { color: colors.foreground }]}>
-            Sheet名：{parsedSheetNames.join("、")}
+            Sheet名：{parsedSheets.map(s => s.name).join("、")}
           </Text>
           <Text style={[styles.sheetHint, { color: colors.muted }]}>
             提示：每个Sheet对应一个国家。请为本次上传指定目的国和渠道。
@@ -205,7 +212,7 @@ export default function QuotesScreen() {
         </View>
       )}
 
-      {!uploadFileData && (
+      {parsedSheets.length === 0 && (
         <TouchableOpacity
           style={[styles.selectFileBtn, { borderColor: colors.primary, backgroundColor: colors.primary + "08" }]}
           onPress={handleFileSelect}
@@ -281,7 +288,7 @@ export default function QuotesScreen() {
       </View>
 
       <View style={styles.uploadActions}>
-        {uploadFileData ? (
+        {parsedSheets.length > 0 ? (
           <TouchableOpacity
             style={[styles.changeFileBtn, { borderColor: colors.border }]}
             onPress={handleFileSelect}
