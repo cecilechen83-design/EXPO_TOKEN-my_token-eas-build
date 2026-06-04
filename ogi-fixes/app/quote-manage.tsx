@@ -34,10 +34,14 @@ async function apiGet(path: string) {
 type CalcResult = {
   success: boolean;
   tableInfo?: { id: number; fileName: string; country: string; channel: string; currency: string };
+  billingMethod?: "weight" | "volume";
+  billingMethodLabel?: string;
+  billingUnit?: string;
   chargeableWeight?: number;
   unitPrice?: number;
   freightBase?: number;
   freightFormula?: string;
+  debugSteps?: string[];
   surcharges?: { name: string; amount: number; formula?: string }[];
   totalPrice?: number;
   currency?: string;
@@ -399,10 +403,22 @@ ${quoteNote ? `<div class="note"><strong>备注：</strong>${quoteNote}</div>` :
                 </View>
 
                 <View style={[styles.formulaBox, { backgroundColor: colors.primary + "08", borderColor: colors.primary + "30" }]}>
-                  <Text style={[styles.formulaLabel, { color: colors.primary }]}>计费重量</Text>
-                  <Text style={[styles.formulaText, { color: colors.foreground }]}>
-                    {`重量 ${calcWeight}kg，体积重 ${calcVolume ? (parseFloat(calcVolume) * 167).toFixed(1) : "0"}kg → 计费重 ${calcResult.chargeableWeight?.toFixed(1) || 0}kg`}
-                  </Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <View style={[styles.methodBadge, { backgroundColor: calcResult.billingMethod === "volume" ? "#0EA5E9" : "#8B5CF6" }]}>
+                      <Text style={styles.methodBadgeText}>{calcResult.billingMethodLabel || "计费方式"}</Text>
+                    </View>
+                    {calcResult.matchedRule && (
+                      <Text style={[styles.formulaLabel, { color: colors.muted, marginBottom: 0 }]}>
+                        匹配品类：{calcResult.matchedRule.category || "通用"}
+                      </Text>
+                    )}
+                  </View>
+                  <Text style={[styles.formulaLabel, { color: colors.primary }]}>计算过程</Text>
+                  {(calcResult.debugSteps || []).map((step, i) => (
+                    <Text key={i} style={[styles.stepText, { color: i === (calcResult.debugSteps!.length - 1) ? colors.primary : colors.foreground }]}>
+                      {step}
+                    </Text>
+                  ))}
                 </View>
 
                 <View style={[styles.breakdownTable, { borderColor: colors.border }]}>
@@ -819,9 +835,12 @@ const styles = StyleSheet.create({
   calcBtnText: { color: "#fff", fontSize: 15, fontWeight: "600" },
   resultHeader: { marginBottom: 12 },
   tableRef: { fontSize: 12, marginTop: 4 },
-  formulaBox: { borderWidth: 1, borderRadius: 8, padding: 10, marginBottom: 14 },
+  formulaBox: { borderWidth: 1, borderRadius: 8, padding: 12, marginBottom: 14 },
   formulaLabel: { fontSize: 11, fontWeight: "600", marginBottom: 4 },
   formulaText: { fontSize: 13, lineHeight: 18 },
+  methodBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4 },
+  methodBadgeText: { color: "#fff", fontSize: 11, fontWeight: "700" },
+  stepText: { fontSize: 13, lineHeight: 22, paddingLeft: 4 },
   breakdownTable: { borderWidth: 1, borderRadius: 8, overflow: "hidden", marginBottom: 14 },
   breakdownHeader: { flexDirection: "row", paddingVertical: 8, paddingHorizontal: 12 },
   bh: { flex: 1, fontSize: 11, fontWeight: "600" },
